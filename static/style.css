@@ -34,3 +34,46 @@
 .ux-radio-group label{margin:0}
 .pinned-banner{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;padding:10px 14px;background:#e6f4f1;border:1px solid #9fd0c6;border-radius:9px;margin-bottom:12px;color:#144d48}
 #toggle-original[aria-pressed=true]{background:#247365;color:white;border-color:#3a9c8b}
+
+.leaflet-control-layers-toggle{width:32px!important;height:32px!important;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23135c58' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolygon points='12 2 2 7 12 12 22 7 12 2'/%3E%3Cpolyline points='2 12 12 17 22 12'/%3E%3Cpolyline points='2 17 12 22 22 17'/%3E%3C/svg%3E")!important;background-size:18px 18px!important;background-position:center!important;background-repeat:no-repeat!important}
+.leaflet-control-layers-expanded{padding:8px 12px!important;color:#1d2c42;font-size:12px}
+.leaflet-control-layers-expanded label{margin:4px 0;display:flex;align-items:center;gap:6px;cursor:pointer}
+.leaflet-control-layers-expanded input{margin:0;width:auto}
+
+.layout.is-side-collapsed{grid-template-columns:1fr}
+.layout.is-side-collapsed>aside{display:none}
+.side-header{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:10px}
+.side-header h3{margin:0}
+.side-header button,#toggle-side-expand{padding:5px 10px;font-size:12px}
+.main:has(.library-split-workspace.is-map-split){display:flex;flex-direction:column;overflow:hidden;padding-bottom:14px}
+.library-split-workspace{display:flex;gap:0;flex:1;min-height:0}
+.library-split-workspace.is-wall-mode{display:block}
+.library-split-workspace.is-map-split #library-map-panel{flex:1;min-width:0;display:flex;flex-direction:column;overflow:hidden}
+.library-split-workspace.is-map-split #map{flex:1;height:auto;min-height:280px;margin-bottom:8px}
+.library-splitter{width:12px;flex:0 0 12px;display:flex;align-items:center;justify-content:center;cursor:ew-resize;background:transparent;color:#7e93a4;user-select:none;touch-action:none}
+.library-splitter:hover,.library-splitter.is-dragging{background:#dce6ec;color:#135c58;border-radius:6px}
+.library-splitter[hidden]{display:none}
+.library-split-workspace.is-map-split .library-results-pane{width:calc(var(--right-pane-vw,34) * 1vw);flex:0 0 auto;display:flex;flex-direction:column;min-width:0;min-height:0;overflow:hidden;padding-left:6px}
+.library-split-workspace.is-map-split #cards{flex:1;min-height:0;overflow-y:auto;align-content:start;grid-auto-rows:max-content;grid-template-columns:repeat(auto-fill,minmax(175px,1fr));padding-right:4px}
+.results-pane-header{display:flex;align-items:baseline;justify-content:space-between;gap:8px;flex-wrap:wrap;margin-bottom:8px}
+.results-pane-header p{margin:0}
+@media(max-width:960px){
+ .main:has(.library-split-workspace.is-map-split){overflow:auto}
+ .library-split-workspace.is-map-split{flex-direction:column;gap:12px}
+ .library-split-workspace.is-map-split #map{height:360px;flex:none}
+ .library-splitter{display:none}
+ .library-split-workspace.is-map-split .library-results-pane{width:100%;padding-left:0}
+}
+
+.main:has(.library-split-workspace){padding:12px 18px}
+.main:has(.library-split-workspace) .library-toolbar{margin-bottom:10px;gap:10px}
+.library-title-group{min-width:140px}
+.library-title-group h1{font-size:20px;margin:0;line-height:1.2}
+.library-title-group p{margin:2px 0 0}
+.library-actions{display:flex;gap:8px;flex-wrap:wrap;margin-left:auto}
+.main:has(.library-split-workspace.is-map-split) .map-note{padding:4px 8px;margin-bottom:4px;font-size:11px}
+.main:has(.library-split-workspace.is-map-split) .map-result-controls label{margin:4px 0}
+.library-split-workspace.is-map-split #cards{grid-template-columns:repeat(auto-fill,minmax(min(100%,var(--photo-size,224px)),1fr));gap:12px}
+.library-split-workspace.is-map-split #cards .photo img{height:calc(var(--photo-size,224px) * 0.72)}
+.results-pane-footer{display:flex;justify-content:flex-end;align-items:center;padding-top:8px;margin-top:6px;border-top:1px solid #e2e9ee;flex-shrink:0}
+.library-split-workspace.is-wall-mode .results-pane-footer{position:sticky;bottom:0;background:#f3f5f8ee;padding:10px 4px;margin-top:14px}

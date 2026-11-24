@@ -9,7 +9,9 @@ import io,hashlib
 class Command(BaseCommand):
     help='Create local demo accounts and sample photos without overwriting existing data'
     def handle(self,*args,**options):
-        d,_=Department.objects.get_or_create(name='工務科');other,_=Department.objects.get_or_create(name='環保科')
+        dept_names=['保育科','管理科','建管科','企劃科','水質科','秘書室','人事室','主計室','政風室']
+        depts={name:Department.objects.get_or_create(name=name)[0] for name in dept_names}
+        d=depts['保育科'];other=depts['管理科']
         users={}
         for name,role,department in [('admin','admin',d),('supervisor','supervisor',d),('member','member',d),('viewer','viewer',d),('other','member',other)]:
             u,created=User.objects.get_or_create(username=name)
