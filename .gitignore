@@ -1,0 +1,10 @@
+.vendor/
+node_modules/
+storage/
+data.sqlite3
+__pycache__/
+*.pyc
+.local-backups/
+.runtime/
+models/
+.external-gateway/

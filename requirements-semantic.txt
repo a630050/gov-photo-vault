@@ -1,0 +1,18 @@
+# Inference-only environment, installed with --no-deps after official CPU torch wheels.
+# Training-only cn-clip dependencies (timm/lmdb) are intentionally not installed.
+cn-clip==1.6.0
+colorama==0.4.6
+filelock==4.2.4
+fsspec==2026.9.0
+jinja2==3.1.6
+markupsafe==3.0.3
+mpmath==1.3.0
+networkx==3.7
+numpy==2.5.4
+opencc-python-reimplemented==0.1.7
+pillow==13.0.0
+setuptools==78.1.0
+six==1.17.0
+sympy==1.13.1
+tqdm==4.70.1
+typing-extensions==4.16.0
