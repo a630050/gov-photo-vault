@@ -1,0 +1,4 @@
+rapidocr-onnxruntime==1.4.4
+opencc-python-reimplemented==0.1.7
+pillow==13.0.0
+numpy==2.2.6

@@ -43,6 +43,12 @@ class Photo(models.Model):
     version=models.PositiveIntegerField(default=1)
     created=models.DateTimeField(auto_now_add=True)
     extracted=models.JSONField(default=dict)
+    dhash=models.CharField(max_length=16,blank=True,default='')
+    burst_group=models.CharField(max_length=36,blank=True,default='',db_index=True)
+    burst_cover=models.BooleanField(default=False)
+    admin_county=models.CharField(max_length=20,blank=True,default='',db_index=True)
+    admin_town=models.CharField(max_length=20,blank=True,default='',db_index=True)
+    admin_village=models.CharField(max_length=30,blank=True,default='')
 class Star(models.Model):
     user=models.ForeignKey(User,on_delete=models.CASCADE)
     photo=models.ForeignKey(Photo,on_delete=models.CASCADE)
@@ -232,3 +238,16 @@ class ExternalImportReceipt(models.Model):
     message=models.CharField(max_length=250,blank=True)
     lease_until=models.DateTimeField(null=True)
     updated=models.DateTimeField(auto_now=True)
+
+
+class PhotoOcr(models.Model):
+    photo = models.ForeignKey(Photo, on_delete=models.CASCADE, related_name='ocr_records')
+    model_key = models.CharField(max_length=120)
+    source_sha = models.CharField(max_length=64)
+    text = models.TextField(blank=True, default='')
+    state = models.CharField(max_length=20, default='ready')
+    error = models.CharField(max_length=250, blank=True)
+    updated = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        unique_together = [('photo', 'model_key')]

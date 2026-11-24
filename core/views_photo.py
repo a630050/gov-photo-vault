@@ -15,11 +15,13 @@ from .helpers import (
     metadata,
     photo,
     photo_snapshot,
+    update_photo_admin_region,
     validate,
     visible,
     writable,
 )
 from .image_metadata import extract_metadata
+from .burst import assign_burst_group, compute_dhash_from_image
 from .models import Anomaly, Dataset, Membership, Notice, Photo, Request, RequestEvent, Star, TagAssertion
 from .permissions import allowed
 
@@ -81,6 +83,7 @@ def handle_photo_api(request, path, data, u):
                     raise ValueError('不支援的圖片格式')
                 cap, time_confirmed, lat, lon, extracted = extract_metadata(im)
                 im = ImageOps.exif_transpose(im).convert('RGB')
+                dhash = compute_dhash_from_image(im)
                 im.thumbnail((1800, 1800))
                 out = io.BytesIO()
                 im.save(out, 'JPEG', quality=88)
@@ -89,6 +92,7 @@ def handle_photo_api(request, path, data, u):
                     uploader=u,
                     name=Path(f.name).name,
                     sha=sha,
+                    dhash=dhash,
                     form_snapshot=ds.item.fields,
                     form_version=ds.item.version,
                     captured=cap,
@@ -99,6 +103,7 @@ def handle_photo_api(request, path, data, u):
                 )
                 p.file.save(uuid.uuid4().hex + Path(f.name).suffix.lower(), ContentFile(raw), save=False)
                 p.preview.save(uuid.uuid4().hex + '.jpg', ContentFile(out.getvalue()), save=False)
+                update_photo_admin_region(p)
                 p.save()
                 audit(u, 'upload', p.id)
                 results.append({'name': p.name, 'id': p.id})
@@ -162,11 +167,14 @@ def handle_photo_api(request, path, data, u):
                         raise Problem('資料已變動，請重新載入', 409)
                     for k, v in metadata(entry).items():
                         setattr(p, k, v)
+                    update_photo_admin_region(p)
                     if submit:
                         validate(p)
                         p.status = 'submitted'
                     p.version += 1
                     p.save()
+                    if submit:
+                        assign_burst_group(p)
                     audit(u, 'submit' if submit else 'save', p.id)
                 results.append({'id': p.id, 'name': name, 'ok': True})
             except Problem as e:
@@ -211,11 +219,14 @@ def handle_photo_api(request, path, data, u):
                 else:
                     for k, v in metadata(data).items():
                         setattr(p, k, v)
+                    update_photo_admin_region(p)
                     if path == 'submit':
                         validate(p)
                         p.status = 'submitted'
                 p.version += 1
                 p.save()
+                if path == 'submit':
+                    assign_burst_group(p)
             elif path == 'tags':
                 tags = [str(t).strip()[:60] for t in data.get('tags', []) if str(t).strip()]
                 batch = data.get('batch') or str(uuid.uuid4())
@@ -270,5 +281,18 @@ def handle_photo_api(request, path, data, u):
                 Anomaly.objects.create(photo=p, author=u, text=data['text'])
         audit(u, path, p.id)
         return JsonResponse({'ok': True})
+
+    if path == 'burst_cover':
+        p = photo(u, data['photo'])
+        p = Photo.objects.select_for_update().select_related('dataset__item').get(id=p.id)
+        editable(u, p, 'organize')
+        if p.status != 'submitted' or not p.burst_group:
+            raise Problem('此照片不屬於已提交的連拍組', 409)
+        Photo.objects.filter(dataset_id=p.dataset_id, burst_group=p.burst_group).exclude(id=p.id).update(burst_cover=False)
+        if not p.burst_cover:
+            p.burst_cover = True
+            p.save(update_fields=['burst_cover'])
+        audit(u, 'burst_cover', p.id, {'burst_group': p.burst_group})
+        return JsonResponse({'ok': True, 'burst_group': p.burst_group})
 
     return None

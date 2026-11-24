@@ -86,7 +86,7 @@ def ack(meta,state,message):return remote('ack',{'id':meta['id'],'grant':meta['g
 
 def receive(meta):
     """Reserve a lease, fetch from DMZ, revalidate, then atomically create one draft."""
-    from .helpers import audit,validate
+    from .helpers import audit,validate,update_photo_admin_region
     id=uuid.UUID(meta['id']);grant_id=uuid.UUID(meta['grant'])
     size=int(meta['size']);sha=str(meta['sha'])
     if not 1<=size<=MAX_FILE or len(sha)!=64 or any(c not in '0123456789abcdef' for c in sha):return 'rejected','檔案大小或雜湊格式無效'
@@ -129,6 +129,7 @@ def receive(meta):
                 name=''.join(c for c in name if ord(c)>=32 and c!='\x7f') or 'upload'+extension
                 p=Photo(dataset=g.dataset,uploader=g.user,name=name,sha=sha,status='draft',form_snapshot=g.fields,form_version=g.form_version,captured=captured,time_confirmed=confirmed,lat=lat,lon=lon,extracted=extracted,attrs=attrs)
                 validate(p)
+                update_photo_admin_region(p)
                 p.file.save(uuid.uuid4().hex+extension,ContentFile(raw),save=False);stored.append(p.file)
                 p.preview.save(uuid.uuid4().hex+'.jpg',ContentFile(out.getvalue()),save=False);stored.append(p.preview);p.save()
                 r.state='imported';r.photo=p;r.message='已匯入內網草稿，請回內網確認後正式提交'

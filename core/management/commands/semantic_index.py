@@ -5,6 +5,8 @@ from django.db import close_old_connections,OperationalError
 from transfer_common.operations import work_cycle,profile
 from core.semantic import index_batch
 from core.semantic_engine import ModelUnavailable
+from core.ocr import index_ocr_batch
+from core.ocr_engine import readiness as ocr_readiness, ModelUnavailable as OcrUnavailable
 
 class Command(BaseCommand):
     help='Build offline photo-content index; --watch indexes newly submitted photos locally.'
@@ -21,9 +23,14 @@ class Command(BaseCommand):
                 close_old_connections()
                 try:
                     with work_cycle('semantic'):
-                        count=index_batch(retry=retry);retry=False
-                    if count:self.stdout.write(f'已處理 {count} 張照片')
-                    if not count and not options['watch']:break
+                        count=index_batch(retry=retry)
+                        ocr_count=0
+                        if ocr_readiness():
+                            try:ocr_count=index_ocr_batch(retry=retry)
+                            except OcrUnavailable:pass
+                        retry=False
+                    if count or ocr_count:self.stdout.write(f'已處理 {count} 張語意／{ocr_count} 張文字索引')
+                    if not count and not ocr_count and not options['watch']:break
                 except (ModelUnavailable,OperationalError,OSError,TimeoutError) as e:
                     self.stderr.write(str(e))
                     if not options['watch']:break

@@ -411,3 +411,179 @@ class BatchOperationsTest(TestCase):
         self.draft2.refresh_from_db()
         self.assertEqual(self.draft1.status, 'submitted')
         self.assertEqual(self.draft2.status, 'draft')
+
+
+class BurstStackingTest(TestCase):
+    def setUp(self):
+        self.dep = Department.objects.create(name='保育科')
+        self.member = User.objects.create_user('m1', password='p')
+        self.viewer = User.objects.create_user('v1', password='p')
+        Membership.objects.create(user=self.member, department=self.dep, role='member')
+        Membership.objects.create(user=self.viewer, department=self.dep, role='viewer')
+        self.item = Item.objects.create(department=self.dep, name='活動紀錄', fields=[])
+        self.ds = Dataset.objects.create(item=self.item, name='記者會', creator=self.member)
+        self.client.force_login(self.member)
+
+    def _upload_and_submit(self, name, color_shift, captured_iso):
+        from PIL import ImageDraw
+        im = Image.new('RGB', (120, 90), (100, 140, 160))
+        draw = ImageDraw.Draw(im)
+        draw.rectangle((10, 10, 90, 70), fill=(200 + color_shift, 150, 80))
+        buf = io.BytesIO()
+        im.save(buf, 'JPEG')
+        buf.seek(0)
+        buf.name = name
+        up = self.client.post('/api/upload', {'dataset': self.ds.id, 'files': buf})
+        self.assertEqual(up.status_code, 200)
+        pid = up.json()['results'][0]['id']
+        p = Photo.objects.get(id=pid)
+        sub = self.client.post(
+            '/api/submit',
+            data=json.dumps({'photo': pid, 'version': p.version, 'captured': captured_iso, 'time_confirmed': True, 'attrs': {}}),
+            content_type='application/json',
+        )
+        self.assertEqual(sub.status_code, 200)
+        return Photo.objects.get(id=pid)
+
+    def test_burst_auto_grouping_and_cover_selection(self):
+        p1 = self._upload_and_submit('b1.jpg', 0, '2026-11-24T10:00:00+08:00')
+        p2 = self._upload_and_submit('b2.jpg', 5, '2026-11-24T10:00:03+08:00')
+        p_far = self._upload_and_submit('far.jpg', 10, '2026-11-24T10:01:00+08:00')
+
+        p1.refresh_from_db()
+        p2.refresh_from_db()
+        p_far.refresh_from_db()
+        self.assertTrue(p1.burst_group)
+        self.assertEqual(p1.burst_group, p2.burst_group)
+        self.assertEqual(p_far.burst_group, '')
+
+        # Set p2 as burst cover
+        r = self.client.post(
+            '/api/burst_cover',
+            data=json.dumps({'photo': p2.id}),
+            content_type='application/json',
+        )
+        self.assertEqual(r.status_code, 200)
+        p1.refresh_from_db()
+        p2.refresh_from_db()
+        self.assertFalse(p1.burst_cover)
+        self.assertTrue(p2.burst_cover)
+
+        # Viewer cannot change cover
+        self.client.force_login(self.viewer)
+        r_denied = self.client.post(
+            '/api/burst_cover',
+            data=json.dumps({'photo': p1.id}),
+            content_type='application/json',
+        )
+        self.assertEqual(r_denied.status_code, 403)
+
+
+class ReverseGeocodingTest(TestCase):
+    def setUp(self):
+        self.dep = Department.objects.create(name='水質科')
+        self.member = User.objects.create_user('m1', password='p')
+        Membership.objects.create(user=self.member, department=self.dep, role='member')
+        self.item = Item.objects.create(department=self.dep, name='河川採樣', fields=[])
+        self.ds = Dataset.objects.create(item=self.item, name='淡水河', creator=self.member)
+        self.client.force_login(self.member)
+
+    def test_offline_reverse_geocode_and_search_stats(self):
+        from core.geocoding import reverse_geocode
+
+        county, town, village = reverse_geocode(25.033, 121.565)
+        self.assertEqual((county, town), ('臺北市', '信義區'))
+        self.assertTrue(village)
+        self.assertEqual(reverse_geocode(None, None), ('', '', ''))
+
+        p1 = Photo.objects.create(
+            dataset=self.ds, uploader=self.member, name='a.jpg', sha='r1',
+            status='draft', lat=25.033, lon=121.565, form_snapshot=[],
+        )
+        res = self.client.post(
+            '/api/submit',
+            data=json.dumps({'photo': p1.id, 'version': p1.version, 'lat': 25.033, 'lon': 121.565, 'attrs': {}}),
+            content_type='application/json',
+        )
+        self.assertEqual(res.status_code, 200)
+        p1.refresh_from_db()
+        self.assertEqual(p1.admin_county, '臺北市')
+        self.assertEqual(p1.admin_town, '信義區')
+        self.assertTrue(p1.admin_village)
+
+        p2 = Photo.objects.create(
+            dataset=self.ds, uploader=self.member, name='b.jpg', sha='r2',
+            status='submitted', lat=None, lon=None, form_snapshot=[],
+        )
+
+        s1 = self.client.post(
+            '/api/search',
+            data=json.dumps({'county': '臺北市', 'town': '信義區'}),
+            content_type='application/json',
+        )
+        self.assertEqual(s1.status_code, 200)
+        self.assertEqual(s1.json()['ids'], [p1.id])
+        self.assertEqual(s1.json()['region_stats'], [{'county': '臺北市', 'town': '信義區', 'count': 1}])
+
+        s2 = self.client.post(
+            '/api/search',
+            data=json.dumps({'county': '__missing__'}),
+            content_type='application/json',
+        )
+        self.assertEqual(s2.json()['ids'], [p2.id])
+
+
+class OcrSearchTest(TestCase):
+    def setUp(self):
+        self.dep = Department.objects.create(name='建管科')
+        self.other = Department.objects.create(name='政風室')
+        self.member = User.objects.create_user('m1', password='p')
+        self.out = User.objects.create_user('o1', password='p')
+        Membership.objects.create(user=self.member, department=self.dep, role='member')
+        Membership.objects.create(user=self.out, department=self.other, role='member')
+        self.item = Item.objects.create(department=self.dep, name='工程告示', fields=[])
+        self.ds = Dataset.objects.create(item=self.item, name='115年堤防', creator=self.member)
+        self.o_item = Item.objects.create(department=self.other, name='稽查', fields=[])
+        self.o_ds = Dataset.objects.create(item=self.o_item, name='機密', creator=self.out)
+        self.client.force_login(self.member)
+
+    def test_ocr_search_scoped_and_multiterm(self):
+        from core.models import PhotoOcr
+        from core.ocr_engine import MODEL_KEY as OCR_MODEL_KEY
+
+        p1 = Photo.objects.create(
+            dataset=self.ds, uploader=self.member, name='sign1.jpg', sha='o1',
+            status='submitted', form_snapshot=[],
+        )
+        p2 = Photo.objects.create(
+            dataset=self.o_ds, uploader=self.out, name='sign2.jpg', sha='o2',
+            status='submitted', form_snapshot=[],
+        )
+        PhotoOcr.objects.create(
+            photo=p1, model_key=OCR_MODEL_KEY, source_sha='o1',
+            text='115年度 淡水河堤防改善工程\n財產編號 EQ-2026-099', state='ready',
+        )
+        PhotoOcr.objects.create(
+            photo=p2, model_key=OCR_MODEL_KEY, source_sha='o2',
+            text='115年度 淡水河堤防改善工程\n財產編號 EQ-2026-099', state='ready',
+        )
+
+        # Case-insensitive English + Traditional Chinese multi-term search
+        r = self.client.post(
+            '/api/semantic/ocr_search',
+            data=json.dumps({'query': '淡水河 eq-2026-099'}),
+            content_type='application/json',
+        )
+        self.assertEqual(r.status_code, 200)
+        body = r.json()
+        self.assertEqual(body['matches'], 1)
+        self.assertEqual([p['id'] for p in body['photos']], [p1.id])
+        self.assertIn('EQ-2026-099', body['photos'][0]['ocr_snippet'])
+
+        # Validation error on empty query
+        bad = self.client.post(
+            '/api/semantic/ocr_search',
+            data=json.dumps({'query': '   '}),
+            content_type='application/json',
+        )
+        self.assertEqual(bad.status_code, 422)

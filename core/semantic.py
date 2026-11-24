@@ -7,6 +7,8 @@ from django.utils import timezone
 from .models import Photo,PhotoEmbedding,Dataset,TagAssertion
 from .permissions import allowed
 from .semantic_engine import MODEL_KEY,DIMENSIONS,ModelUnavailable,readiness,text_vector,image_vectors
+from .ocr import index_ocr_batch,ocr_coverage,ocr_search
+from .ocr_engine import MODEL_KEY as OCR_MODEL_KEY,readiness as ocr_readiness,ModelUnavailable as OcrUnavailable
 
 def valid_vector(vector):
     return isinstance(vector,list) and len(vector)==DIMENSIONS and all(type(x) in (int,float) and math.isfinite(x) for x in vector) and .99<sum(x*x for x in vector)<1.01
@@ -42,7 +44,26 @@ def semantic_api(path,data,u):
         indexed=PhotoEmbedding.objects.filter(model_key=MODEL_KEY,photo_id__in=q.values('id'),source_sha=F('photo__sha'))
         ready=indexed.filter(state='ready').count();failed=indexed.filter(state='failed').count()
         return {'total':total,'indexed':ready,'failed':failed,'pending':total-ready-failed}
-    if path=='semantic/status':return JsonResponse({'ready':readiness(),'model':MODEL_KEY,**coverage(scope())})
+    if path=='semantic/status':return JsonResponse({'ready':readiness(),'model':MODEL_KEY,**coverage(scope()),'ocr':{'ready':ocr_readiness(),'model':OCR_MODEL_KEY,**ocr_coverage(scope())}})
+    if path=='semantic/ocr_index':
+        if not ocr_readiness():raise Problem('離線 OCR 環境尚未就緒',503)
+        try:processed=index_ocr_batch(limit=10,retry=bool(data.get('retry')))
+        except OcrUnavailable as e:raise Problem(str(e),503)
+        return JsonResponse({'ok':True,'processed':processed,'ocr':{'ready':ocr_readiness(),'model':OCR_MODEL_KEY,**ocr_coverage(scope())}})
+    if path=='semantic/ocr_search':
+        query=data.get('query','')
+        if not isinstance(query,str) or not query.strip() or len(query.strip())>100:raise Problem('請輸入 1 至 100 字的圖片文字關鍵字（支援英文與繁體中文）',422)
+        limit=int(data.get('limit',200))
+        if not 1<=limit<=500:raise Problem('筆數設定無效',422)
+        q=scope();info=ocr_coverage(q)
+        if not info['indexed']:return JsonResponse({'photos':[],'matches':0,'returned':0,'limited':False,'model':OCR_MODEL_KEY,**info})
+        hits,matches=ocr_search(q,query.strip(),limit=limit)
+        current={p.id:p for p in scope().filter(id__in=[pid for pid,_ in hits])}
+        ordered=[current[pid] for pid,_ in hits if pid in current]
+        serialized={item['id']:item for item in serialize_photos(ordered,u)}
+        photos=[{**serialized[pid],'ocr_snippet':snippet} for pid,snippet in hits if pid in serialized]
+        audit(u,'ocr_search',OCR_MODEL_KEY,{'query_length':len(query),'returned':len(photos)})
+        return JsonResponse({'photos':photos,'matches':matches,'returned':len(photos),'limited':matches>limit,'model':OCR_MODEL_KEY,**ocr_coverage(scope())})
     if path=='semantic/search':
         query=data.get('query','')
         if not isinstance(query,str) or not query.strip() or len(query.strip())>100:raise Problem('請輸入 1 至 100 字的中文關鍵字或短句',422)

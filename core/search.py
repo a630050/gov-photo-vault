@@ -44,6 +44,10 @@ def search_photos(queryset, user, criteria):
     datasets = [int(x) for x in criteria.get('datasets',[])]
     if departments or datasets:q=q.filter(Q(dataset__item__department_id__in=departments)|Q(dataset_id__in=datasets))
     if criteria.get('text'):q=q.filter(name__icontains=str(criteria['text'])[:200])
+    for param,col in (('county','admin_county'),('town','admin_town'),('village','admin_village')):
+        val=str(criteria.get(param,'') or '').strip()
+        if val=='__missing__':q=q.filter(**{col:''})
+        elif val:q=q.filter(**{col:val})
     if criteria.get('star'):q=q.filter(id__in=Star.objects.filter(user=user).values('photo_id'))
     anomaly = criteria.get('anomaly','')
     if anomaly:
@@ -86,4 +90,10 @@ def search_photos(queryset, user, criteria):
     tags=criteria.get('tags',[])
     if not isinstance(tags,list) or any(not isinstance(t,str) for t in tags):raise SearchError('標籤條件格式錯誤')
     rows=[p for p in q.order_by(F('captured').desc(nulls_last=True),'-id') if (not tags or any(t in p.tags for t in tags)) and all(custom_match(p,rule) for rule in rules)]
-    return {'ids':[p.id for p in rows],'total':len(rows),'located':sum(p.lat is not None and p.lon is not None for p in rows),'missing_location':sum(p.lat is None or p.lon is None for p in rows),'excluded_missing_time':sum((not tags or any(t in p.tags for t in tags)) and all(custom_match(p,rule) for rule in rules) for p in missing_time) if start or end else 0}
+    region_counts={}
+    for p in rows:
+        if p.admin_county:
+            key=(p.admin_county,p.admin_town)
+            region_counts[key]=region_counts.get(key,0)+1
+    region_stats=[{'county':c,'town':t,'count':n} for (c,t),n in sorted(region_counts.items(),key=lambda kv:(-kv[1],kv[0][0],kv[0][1]))]
+    return {'ids':[p.id for p in rows],'total':len(rows),'located':sum(p.lat is not None and p.lon is not None for p in rows),'missing_location':sum(p.lat is None or p.lon is None for p in rows),'excluded_missing_time':sum((not tags or any(t in p.tags for t in tags)) and all(custom_match(p,rule) for rule in rules) for p in missing_time) if start or end else 0,'region_stats':region_stats}

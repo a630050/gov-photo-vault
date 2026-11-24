@@ -8,6 +8,7 @@ from django.utils.dateparse import parse_datetime
 from .models import Audit, Anomaly, Membership, PersonPhotoLink, Request, Revision, Star, Photo
 from .permissions import allowed, capabilities_data
 from .face_engine import MODEL_KEY as FACE_MODEL_KEY
+from .geocoding import reverse_geocode
 
 
 class Problem(Exception):
@@ -207,6 +208,11 @@ def serialize_photos(photos, u):
             form_version=p.form_version,
             tags=p.tags,
             version=p.version,
+            burst_group=p.burst_group,
+            burst_cover=p.burst_cover,
+            county=p.admin_county,
+            town=p.admin_town,
+            village=p.admin_village,
             star=p.id in starred_ids,
             uploader=p.uploader.username,
             preview=f'/media/{p.id}/preview',
@@ -220,6 +226,13 @@ def serialize_photos(photos, u):
 
 def serialize(p, u):
     return serialize_photos([p], u)[0]
+
+
+def update_photo_admin_region(p):
+    county, town, village = reverse_geocode(p.lat, p.lon)
+    p.admin_county = county
+    p.admin_town = town
+    p.admin_village = village
 
 
 FIELD_TYPES = {'text', 'textarea', 'integer', 'number', 'date', 'select', 'multi', 'boolean'}

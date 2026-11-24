@@ -19,6 +19,7 @@ from .helpers import (
     photo_snapshot,
     request_scope,
     revision,
+    update_photo_admin_region,
     validate,
     visible,
 )
@@ -77,6 +78,7 @@ def handle_workflow_api(path, data, u):
             elif r.kind == 'correct':
                 for k, v in metadata(r.payload).items():
                     setattr(p, k, v)
+                update_photo_admin_region(p)
                 validate(p)
             elif r.kind == 'move':
                 dest = Dataset.objects.get(id=r.payload['dataset'])
