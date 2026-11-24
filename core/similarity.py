@@ -29,8 +29,7 @@ def snapshot(p):
     return {'id':p.id,'version':p.version,'sha':p.sha,'captured':p.captured.isoformat() if p.captured else None,'time_confirmed':p.time_confirmed}
 
 def similarity_api(path,data,u):
-    # Imported at call time to share the application's central authorization rules.
-    from .views import Problem,visible,serialize,audit
+    from .helpers import Problem,visible,serialize_photos,audit
     def dataset(id):
         ds=Dataset.objects.select_related('item').filter(id=id).first()
         if not ds or not allowed(u,ds.item.department_id,'analyze'):raise Problem('沒有該資料集的近似分析權限',403)
@@ -108,12 +107,13 @@ def similarity_api(path,data,u):
     if path=='similarity/results':
         r=run(data['run']);offset=max(0,int(data.get('offset',0)))
         current={p.id:p for p in visible(u).filter(dataset_id=r.dataset_id,status='submitted',id__in=[m['id'] for m in r.members])}
+        serialized={item['id']:item for item in serialize_photos(current.values(),u)}
         members={m['id']:m for m in r.members};pairs=[]
         for p in r.pairs.order_by('id')[offset:offset+50]:
             a,b=current.get(p.a_id),current.get(p.b_id)
             if not a or not b:
                 pairs.append({'id':p.id,'unavailable':True});continue
-            pairs.append(dict(id=p.id,a=serialize(a,u),b=serialize(b,u),distances=p.distances,gap_hours=p.gap_hours,time_state=p.time_state,review=p.review,events=p.events,stale=snapshot(a)!=members[a.id] or snapshot(b)!=members[b.id]))
+            pairs.append(dict(id=p.id,a=serialized[a.id],b=serialized[b.id],distances=p.distances,gap_hours=p.gap_hours,time_state=p.time_state,review=p.review,events=p.events,stale=snapshot(a)!=members[a.id] or snapshot(b)!=members[b.id]))
         return JsonResponse({'run':run_data(r),'pairs':pairs,'offset':offset,'next':offset+50 if r.pairs.count()>offset+50 else None,'failures':[x for x in r.fingerprints if 'error' in x]})
     if path in ['similarity/pair','similarity/review']:
         with transaction.atomic():
@@ -123,7 +123,7 @@ def similarity_api(path,data,u):
             photos=list(visible(u).filter(id__in=[p.a_id,p.b_id],dataset=ds,status='submitted').order_by('id'))
             if len(photos)!=2:raise Problem('照片已移動、回收或無權查看',409)
             members={m['id']:m for m in r.members};stale=any(snapshot(x)!=members[x.id] for x in photos)
-            if path.endswith('pair'):return JsonResponse({'photos':[serialize(x,u) for x in photos],'stale':stale})
+            if path.endswith('pair'):return JsonResponse({'photos':serialize_photos(photos,u),'stale':stale})
             if stale:raise Problem('照片資料已變動，請重新分析後標註',409)
             review=data['review'];note=str(data.get('note','')).strip()
             if review not in ['unreviewed','clear','anomaly'] or len(note)>2000:raise Problem('檢閱狀態或說明無效',422)

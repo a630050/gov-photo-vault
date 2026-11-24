@@ -33,8 +33,8 @@ function renderLibrary(){
  $('#clear').onclick=()=>{const view=ls.view,follow=ls.follow;resetLibrary();ls.view=view;ls.follow=follow;renderLibrary()};
  $('#follow').onchange=e=>{ls.follow=e.target.checked;ls.group=null;drawLibraryResults()};$('#fit-results').onclick=fitLibraryResults;$('#reset-cluster').onclick=()=>{ls.group=null;drawLibraryResults()};
  $('#selectall').onclick=()=>{ls.visible.forEach(p=>selected.add(p.id));drawLibraryResults()};
- $('#batchstar').onclick=()=>action(async()=>{for(const p of ls.visible.filter(p=>selected.has(p.id)&&!p.star))await api('star',{photo:p.id});await refresh()});
- $('#batchtag').onclick=()=>action(async()=>{const rows=ls.visible.filter(p=>selected.has(p.id));if(!rows.length)return toast('請先勾選照片');const tags=prompt(`為 ${rows.length} 張新增標籤（逗號分隔）`);if(!tags)return;const batch=crypto.randomUUID();for(const p of rows)await api('tags',{photo:p.id,tags:tags.split(','),batch});lastTagBatch=batch;await refresh()});
+ $('#batchstar').onclick=()=>action(async()=>{const ids=ls.visible.filter(p=>selected.has(p.id)&&!p.star).map(p=>p.id);if(!ids.length)return toast('請先勾選未打星照片');await api('batch_star',{photos:ids});await refresh()});
+ $('#batchtag').onclick=()=>action(async()=>{const rows=ls.visible.filter(p=>selected.has(p.id));if(!rows.length)return toast('請先勾選照片');const tags=prompt(`為 ${rows.length} 張新增標籤（逗號分隔）`);if(!tags)return;const batch=crypto.randomUUID();await api('batch_tags',{photos:rows.map(p=>p.id),tags:tags.split(','),batch});lastTagBatch=batch;await refresh()});
  $('#undo-lib-tags').onclick=()=>action(async()=>{await api('undo_tags',{batch:lastTagBatch});lastTagBatch=null;await refresh()});
  if($('#export-library'))$('#export-library').onclick=()=>action(async()=>{const ids=ls.visible.filter(p=>selected.has(p.id)).map(p=>p.id),result=await api('export',{photos:ids});const link=document.createElement('a');link.href=result.url;link.textContent='下載匯出 ZIP';$('#export-library').after(link);toast('匯出已完成')});
  setLibraryPhotoSize(ls.size);drawLibraryFieldFilters();if(ls.mode==='map')initializeLibraryMap();scheduleLibrarySearch(0);

@@ -3,9 +3,7 @@ const roleLabels={viewer:'僅閱覽',member:'科室同仁',supervisor:'科室主
 const requestKinds={delete:'刪除照片',correct:'更正照片資料',move:'搬移資料集'};
 const requestStates={pending:'待審核',approved:'已核准',rejected:'已駁回',withdrawn:'已撤回',invalidated:'已失效'};
 let workflowFilter={view:'todo',department:'',state:'',kind:''};
-const originalAccounts=renderAccounts;
-renderAccounts=function(){
- originalAccounts();
+function enhanceAccountsAdmin(){
  const grant=$('#grant');grant.className='permissions-form';grant.innerHTML=`<div class="row"><div><label for="grant-person">人員</label><select id="grant-person" name="user">${option(state.users,'','username')}</select></div><div><label for="grant-department">科室</label><select id="grant-department" name="department">${option(state.departments,'')}</select></div><div><label for="grant-role">科室角色</label><select id="grant-role" name="role">${Object.entries(roleLabels).map(([v,l])=>`<option value="${v}">${l}</option>`).join('')}</select></div></div><p class="muted">科室角色決定閱覽範圍與主管審核身分；以下能力可獨立勾選。未授予的能力由後端拒絕。</p><div class="capability-grid">${Object.entries(capabilityLabels).map(([key,label])=>`<label class="check"><input type="checkbox" data-capability="${key}">${label}</label>`).join('')}</div><p id="grant-status" class="muted"></p><div class="row"><button class="primary">儲存科室角色與權限</button><button id="remove-membership" type="button" class="danger">移除此科室授權</button></div>`;
  const defaults=role=>({upload:role!=='viewer',organize:role!=='viewer',download:role!=='viewer',forms:role==='supervisor',export:false,analyze:role!=='viewer',people_view:false,face_search:false,people_manage:false});
  function mark(perms){document.querySelectorAll('[data-capability]').forEach(c=>c.checked=!!perms[c.dataset.capability])}
@@ -17,7 +15,7 @@ renderAccounts=function(){
  const history=document.createElement('section');history.className='card';
  function describeGrant(snapshot){return '帳號：'+(snapshot.active?'啟用':'停用')+'；'+(snapshot.memberships||[]).map(m=>(dep(m.department_id)?.name||m.department_id)+' / '+(state.users.find(u=>u.id===m.user_id)?.is_superuser?'系統管理者':(roleLabels[m.role]||m.role))+' / '+Object.entries(m.permissions||{}).map(([k,v])=>(capabilityLabels[k]||k)+': '+(v?'允許':'不允許')).join('、')).join('；')}
  history.innerHTML='<h3>近期權限變更紀錄</h3>'+state.audits.filter(a=>a.action==='membership').map(a=>`<details><summary>${esc(displayCapture(a.created))} · ${esc(a.actor__username)} → ${esc(state.users.find(u=>String(u.id)===a.target)?.username||a.target)}</summary><p>變更前：${esc(describeGrant(a.detail.before||{}))}</p><p>變更後：${esc(describeGrant(a.detail.after||{}))}</p></details>`).join('');$('#main').append(history);
-};
+}
 function renderWorkflow(){
  const f=workflowFilter,rows=state.requests.filter(r=>(f.view==='todo'?r.can_review:f.view==='mine'?r.author__username===state.user.name:true)&&(!f.department||r.department==f.department)&&(!f.state||r.state===f.state)&&(!f.kind||r.kind===f.kind));
  $('#side').innerHTML=`<h3>申請審核</h3><div class="admin-nav">${[['todo','我的審核待辦'],['mine','我提出的申請'],['history','可查看的案件紀錄']].map(([v,label])=>`<button data-workflow-view="${v}" class="${f.view===v?'primary':''}">${label}${v==='todo'?' · '+state.requests.filter(r=>r.can_review).length:''}</button>`).join('')}</div><p class="muted">主管只能處理所管科室。本人申請由其他主管或系統管理者處理。</p>`;
@@ -42,12 +40,11 @@ function openRequest(id){
  $('#close-request').onclick=()=>m.remove();if($('#request-photo'))$('#request-photo').onclick=()=>{m.remove();openPhoto(r.photo_id)};
  for(const [id,decision] of [['approve-request','approve'],['reject-request','reject'],['withdraw-request','withdraw']])if($('#'+id))$('#'+id).onclick=()=>action(async()=>{const reason=decision==='withdraw'?'申請人撤回':$('#review-reason').value.trim();if(!reason)return toast('請填寫處理理由');m.querySelectorAll('button').forEach(b=>b.disabled=true);try{await api('decision',{id:r.id,decision,reason});state=await api('state');m.remove();render();openRequest(r.id);toast('處理結果已保存，申請者將收到站內通知')}catch(e){m.querySelectorAll('button').forEach(b=>b.disabled=false);throw e}});
 }
-const workflowOpenPhoto=openPhoto;
-openPhoto=function(id){
- workflowOpenPhoto(id);const p=state.photos.find(p=>p.id===id);if(p.people?.length){const info=document.createElement('section');info.innerHTML='<h4>已人工確認人物</h4>'+p.people.map(x=>'<p>'+esc(x.name)+' · '+esc(x.code)+'</p>').join('');$('#props').append(info)}
+function enhancePhotoModal(p){
+ if(p.people?.length){const info=document.createElement('section');info.innerHTML='<h4>已人工確認人物</h4>'+p.people.map(x=>'<p>'+esc(x.name)+' · '+esc(x.code)+'</p>').join('');$('#props').append(info)}
  if($('#correct'))$('#correct').onclick=()=>photoRequestDialog(p,'correct',payload(p,$('#meta')));
  if($('#delete'))$('#delete').onclick=()=>photoRequestDialog(p,'delete',{});
-};
+}
 function photoRequestDialog(p,kind,proposal){
  const m=document.createElement('div');m.className='form-preview-backdrop request-dialog-backdrop';const r={kind,before:{captured:p.captured||null,lat:p.lat,lon:p.lon,time_confirmed:p.time_confirmed,attrs:p.attrs,fields:p.fields,version:p.version,status:p.status},payload:proposal};
  m.innerHTML=`<section class="card request-dialog" role="dialog" aria-modal="true" aria-label="送出照片申請"><div class="toolbar"><h2>${esc(requestKinds[kind])}</h2><button id="cancel-photo-request">取消</button></div><p>${esc(p.name)}</p>${requestDiff(r)}<label for="photo-request-reason">申請理由（必填）</label><textarea id="photo-request-reason" placeholder="請說明需要刪除或更正的原因"></textarea><p class="muted">送出後等待所屬科室主管或系統管理者處理，現在不會直接改動照片。</p><button class="primary" id="send-photo-request">送出申請</button></section>`;document.body.append(m);$('#cancel-photo-request').onclick=()=>m.remove();$('#send-photo-request').onclick=()=>action(async()=>{const reason=$('#photo-request-reason').value.trim();if(!reason)return toast('請填寫申請理由');$('#send-photo-request').disabled=true;try{await api('request',{photo:p.id,version:p.version,kind,payload:proposal,reason});state=await api('state');m.remove();toast('申請已送出，可到「我提出的申請」追蹤進度')}catch(e){$('#send-photo-request').disabled=false;throw e}});

@@ -77,7 +77,17 @@ async function receiveUploadFiles(){
 }
 async function persistUploadRows(rows){
  const w=uploadWorkspace;w.busy=true;w.messages=[];renderUpload();
- try{for(const raw of rows){const p=uploadPhoto(raw);try{await api('save',{photo:p.id,version:p.version,captured:p.captured,time_confirmed:p.time_confirmed,lat:p.lat,lon:p.lon,attrs:p.attrs});w.edits.delete(p.id);w.messages.push({name:p.name,message:'草稿已儲存'})}catch(e){w.messages.push({name:p.name,error:true,message:e.message})}}state=await api('state')}
+ try{
+  const items=rows.map(raw=>{const p=uploadPhoto(raw);return {photo:p.id,version:p.version,captured:p.captured,time_confirmed:p.time_confirmed,lat:p.lat,lon:p.lon,attrs:p.attrs}});
+  if(items.length){
+   const r=await api('batch_save',{items});
+   for(const res of r.results){
+    if(res.error){w.messages.push({name:res.name,error:true,message:res.error})}
+    else{w.edits.delete(res.id);w.messages.push({name:res.name,message:'草稿已儲存'})}
+   }
+   state=await api('state');
+  }
+ }catch(e){w.messages.push({name:'批次儲存',error:true,message:e.message})}
  finally{w.busy=false}
 }
 async function reviewUploadSubmit(){
@@ -87,7 +97,7 @@ async function reviewUploadSubmit(){
  const rows=uploadChosen().filter(p=>!failed.has(p.name)&&!w.edits.has(p.id)),valid=rows.filter(p=>!missingFields(p).length),invalid=rows.filter(p=>missingFields(p).length);
  const overlay=document.createElement('div');overlay.className='form-preview-backdrop';overlay.innerHTML=`<section class="card submit-review" role="dialog" aria-modal="true" aria-label="確認提交照片"><h2>確認提交照片</h2><p>本次勾選 ${chosen.length} 張，可提交 ${valid.length} 張。</p>${invalid.length?`<div class="metadata-warning">以下 ${invalid.length} 張保留草稿，請補填必填欄位：${invalid.map(p=>`<p>${esc(p.name)}：${esc(missingFields(p).join('、'))}</p>`).join('')}</div>`:''}${w.messages.filter(m=>m.error).map(m=>`<p class="error">${esc(m.name)}：${esc(m.message)}</p>`).join('')}<div class="submit-review-list">${valid.map(p=>`<div><strong>${esc(p.name)}</strong><p>${esc(displayCapture(p.captured))} · ${p.lat==null?'待補座標':`${esc(p.lat)}, ${esc(p.lon)}`}</p><small>${p.fields.map(f=>esc(f.label)+': '+esc(Array.isArray(p.attrs[f.key])?p.attrs[f.key].join('、'):p.attrs[f.key]??'未填')).join(' · ')}</small></div>`).join('')}</div><p class="muted">${valid.filter(p=>!p.captured||p.lat==null).length} 張缺少時間或位置，提交後會列為待補。提交後修改正式資料需提出更正申請。</p><label class="check"><input id="confirm-upload-reviewed" type="checkbox">我已檢查表單、拍攝時間與座標，確認提交以上可提交照片</label><div class="row"><button id="cancel-upload-review">返回修改</button><button id="confirm-upload-submit" class="primary" disabled>確認提交 ${valid.length} 張</button></div></section>`;document.body.append(overlay);
  $('#confirm-upload-reviewed').onchange=e=>$('#confirm-upload-submit').disabled=!e.target.checked||!valid.length;$('#cancel-upload-review').onclick=()=>overlay.remove();
- $('#confirm-upload-submit').onclick=()=>action(async()=>{const button=$('#confirm-upload-submit');button.disabled=true;$('#cancel-upload-review').disabled=true;w.busy=true;w.messages=[];try{for(const p of valid){try{await api('submit',{photo:p.id,version:p.version,captured:p.captured,time_confirmed:p.time_confirmed,lat:p.lat,lon:p.lon,attrs:p.attrs});w.messages.push({name:p.name,message:'已正式提交'});w.selected.delete(p.id)}catch(e){w.messages.push({name:p.name,error:true,message:e.message})}}state=await api('state');toast(`已提交 ${w.messages.filter(m=>!m.error).length} 張；未成功者保留草稿`)}finally{w.busy=false;overlay.remove();renderUpload()}});
+ $('#confirm-upload-submit').onclick=()=>action(async()=>{const button=$('#confirm-upload-submit');button.disabled=true;$('#cancel-upload-review').disabled=true;w.busy=true;w.messages=[];try{const items=valid.map(p=>({photo:p.id,version:p.version,captured:p.captured,time_confirmed:p.time_confirmed,lat:p.lat,lon:p.lon,attrs:p.attrs}));const r=await api('batch_submit',{items});for(const res of r.results){if(res.error){w.messages.push({name:res.name,error:true,message:res.error})}else{w.messages.push({name:res.name,message:'已正式提交'});w.selected.delete(res.id)}}state=await api('state');toast(`已提交 ${w.messages.filter(m=>!m.error).length} 張；未成功者保留草稿`)}finally{w.busy=false;overlay.remove();renderUpload()}});
 }
 
 window.addEventListener('beforeunload',e=>{if(uploadWorkspace.edits.size||uploadWorkspace.busy){e.preventDefault();e.returnValue=''}});

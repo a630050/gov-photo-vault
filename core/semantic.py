@@ -31,7 +31,7 @@ def index_batch(limit=5,retry=False):
     return len(rows)
 
 def semantic_api(path,data,u):
-    from .views import visible,dept_ids,serialize,Problem,audit,editable
+    from .helpers import visible,serialize_photos,Problem,audit,editable
     def scope():
         ids=data.get('datasets',[])
         if not isinstance(ids,list) or any(type(id) is not int for id in ids):raise Problem('資料集條件格式錯誤',422)
@@ -64,7 +64,9 @@ def semantic_api(path,data,u):
             if score>=minimum:scored.append((entry.photo_id,max(-1,min(1,score))))
         scored.sort(key=lambda pair:(-pair[1],pair[0]));matches=len(scored);top=scored[:limit]
         current={p.id:p for p in scope().filter(id__in=[id for id,_ in top])}
-        photos=[{**serialize(current[id],u),'semantic_score':round(score,5)} for id,score in top if id in current]
+        ordered=[current[id] for id,_ in top if id in current]
+        serialized={item['id']:item for item in serialize_photos(ordered,u)}
+        photos=[{**serialized[id],'semantic_score':round(score,5)} for id,score in top if id in serialized]
         audit(u,'semantic_search',MODEL_KEY,{'query_length':len(query),'returned':len(photos),'datasets':list(scope().values_list('dataset_id',flat=True).distinct())})
         return JsonResponse({'photos':photos,'matches':matches,'returned':len(photos),'limited':matches>limit,'model':MODEL_KEY,**coverage(scope())})
     if path=='semantic/tag':

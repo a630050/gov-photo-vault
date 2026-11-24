@@ -334,3 +334,80 @@ class ComparisonTests(TestCase):
     def test_missing_base_location_and_revocation(self):
         self.p.lat=None;self.p.save();self.assertEqual(self.nearby().status_code,422)
         Membership.objects.filter(user=self.member).delete();self.assertEqual(self.nearby().status_code,404)
+
+
+class BatchOperationsTest(TestCase):
+    def setUp(self):
+        self.dep = Department.objects.create(name='水利科')
+        self.other = Department.objects.create(name='環保科')
+        self.member = User.objects.create_user('m1', password='p')
+        self.viewer = User.objects.create_user('v1', password='p')
+        Membership.objects.create(user=self.member, department=self.dep, role='member')
+        Membership.objects.create(user=self.viewer, department=self.dep, role='viewer')
+        self.item = Item.objects.create(
+            department=self.dep,
+            name='堤防巡檢',
+            fields=[{'key': 'note', 'label': '備註', 'type': 'text', 'required': True}],
+        )
+        self.ds = Dataset.objects.create(item=self.item, name='第一季', creator=self.member)
+        self.draft1 = Photo.objects.create(
+            dataset=self.ds, uploader=self.member, name='d1.jpg', sha='a1',
+            status='draft', form_snapshot=self.item.fields,
+        )
+        self.draft2 = Photo.objects.create(
+            dataset=self.ds, uploader=self.member, name='d2.jpg', sha='a2',
+            status='draft', form_snapshot=self.item.fields,
+        )
+        self.submitted = Photo.objects.create(
+            dataset=self.ds, uploader=self.member, name='s1.jpg', sha='s1',
+            status='submitted', form_snapshot=self.item.fields, attrs={'note': 'ok'},
+        )
+        self.client.force_login(self.member)
+
+    def post(self, path, payload):
+        return self.client.post(f'/api/{path}', data=json.dumps(payload), content_type='application/json')
+
+    def test_batch_star_and_tags(self):
+        r1 = self.post('batch_star', {'photos': [self.submitted.id]})
+        self.assertEqual(r1.status_code, 200)
+        self.assertEqual(r1.json()['count'], 1)
+        # Re-starring is idempotent
+        r2 = self.post('batch_star', {'photos': [self.submitted.id]})
+        self.assertEqual(r2.status_code, 200)
+        self.assertEqual(r2.json()['count'], 0)
+
+        t1 = self.post('batch_tags', {'photos': [self.submitted.id], 'tags': ['護岸', '巡查']})
+        self.assertEqual(t1.status_code, 200)
+        self.submitted.refresh_from_db()
+        self.assertEqual(self.submitted.tags, ['巡查', '護岸'])
+
+        # Viewer cannot batch tag
+        self.client.force_login(self.viewer)
+        t2 = self.post('batch_tags', {'photos': [self.submitted.id], 'tags': ['測試']})
+        self.assertEqual(t2.status_code, 403)
+
+    def test_batch_save_and_submit_partial_results(self):
+        res = self.post('batch_save', {
+            'items': [
+                {'photo': self.draft1.id, 'version': self.draft1.version, 'attrs': {'note': '已完成'}},
+                {'photo': self.draft2.id, 'version': self.draft2.version, 'attrs': {}},
+            ]
+        })
+        self.assertEqual(res.status_code, 200)
+        self.draft1.refresh_from_db()
+        self.assertEqual(self.draft1.attrs['note'], '已完成')
+
+        sub = self.post('batch_submit', {
+            'items': [
+                {'photo': self.draft1.id, 'version': self.draft1.version, 'attrs': {'note': '已完成'}},
+                {'photo': self.draft2.id, 'version': self.draft2.version, 'attrs': {}},
+            ]
+        })
+        self.assertEqual(sub.status_code, 200)
+        results = {r['id']: r for r in sub.json()['results']}
+        self.assertTrue(results[self.draft1.id]['ok'])
+        self.assertIn('error', results[self.draft2.id])
+        self.draft1.refresh_from_db()
+        self.draft2.refresh_from_db()
+        self.assertEqual(self.draft1.status, 'submitted')
+        self.assertEqual(self.draft2.status, 'draft')

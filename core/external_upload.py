@@ -47,7 +47,7 @@ def describe(g):
     return {'id':str(g.id),'user':g.user.username,'dataset':g.dataset_id,'dataset_name':g.dataset.name,'expires':g.expires.isoformat(),'max_files':g.max_files,'max_bytes':g.max_bytes,'revoked':g.revoked,'effective':not grant_error(g),'synced':g.synced.isoformat() if g.synced else None,'sync_error':g.sync_error,'receipts':[{'id':str(r.id),'state':r.state,'message':r.message,'photo':r.photo_id if r.state=='imported' else None,'updated':r.updated.isoformat()} for r in g.receipts.order_by('-updated')[:50]]}
 
 def external_api(path,data,u):
-    from .views import Problem,audit
+    from .helpers import Problem,audit
     if path=='external/list':
         return JsonResponse({'configured':config(False) is not None,'gateway_url':config(False)['url'] if config(False) else None,'grants':[describe(g) for g in grants_for(u).select_related('dataset__item','user').order_by('-created')[:100]]})
     if path=='external/issue':
@@ -86,7 +86,7 @@ def ack(meta,state,message):return remote('ack',{'id':meta['id'],'grant':meta['g
 
 def receive(meta):
     """Reserve a lease, fetch from DMZ, revalidate, then atomically create one draft."""
-    from .views import audit,validate
+    from .helpers import audit,validate
     id=uuid.UUID(meta['id']);grant_id=uuid.UUID(meta['grant'])
     size=int(meta['size']);sha=str(meta['sha'])
     if not 1<=size<=MAX_FILE or len(sha)!=64 or any(c not in '0123456789abcdef' for c in sha):return 'rejected','檔案大小或雜湊格式無效'

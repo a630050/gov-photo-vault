@@ -10,15 +10,14 @@ from django.contrib.auth import get_user_model
 from .models import Person,PersonReference,FacePhotoIndex,FaceObservation,PersonPhotoLink,PersonLinkEvent,Department,Photo
 from .permissions import allowed
 from .face_engine import MODEL_KEY,DIMENSIONS,MINIMUM,readiness,extract,ModelUnavailable
+from .helpers import Problem,visible,serialize_photos,audit
 
 def valid_vector(v):return isinstance(v,list) and len(v)==DIMENSIONS and all(type(x) in (int,float) and math.isfinite(x) for x in v) and .99<sum(x*x for x in v)<1.01
 
 def authorize(u,department,*capabilities):
-    from .views import Problem
     if not get_user_model().objects.filter(id=u.id,is_active=True).exists() or not all(allowed(u,department,k) for k in ('people_view',*capabilities)):raise Problem('未取得此科室的人物閱覽或專用操作權限',403)
 
 def get_person(u,id,*caps,lock=False):
-    from .views import Problem
     try:id=uuid.UUID(str(id))
     except ValueError:raise Problem('人物識別格式錯誤',422)
     q=Person.objects.select_for_update() if lock else Person.objects
@@ -32,7 +31,6 @@ def photo_people(p,u):
     return [{'link':x.id,'person':str(x.person_id),'name':x.person.name,'code':x.person.code,'face':str(x.face_id),'bbox':x.face.bbox} for x in PersonPhotoLink.objects.filter(active=True,person__active=True,person__department_id=p.dataset.item.department_id,face__photo=p,face__model_key=MODEL_KEY,face__source_sha=p.sha).select_related('person','face')]
 
 def reference_asset(request,id):
-    from .views import Problem
     try:
         if not request.user.is_authenticated:raise Problem('請先登入',401)
         ref=PersonReference.objects.select_related('person').filter(id=id).first()
@@ -45,7 +43,6 @@ def reference_asset(request,id):
     except OSError:return JsonResponse({'error':'參考照片暫不可用'},status=503)
 
 def people_api(request,path,data,u):
-    from .views import Problem,visible,serialize,audit
     def person_data(p):
         manage=allowed(u,p.department_id,'people_manage');face_search=allowed(u,p.department_id,'face_search')
         refs=p.references.all() if manage else p.references.filter(active=True)
@@ -169,12 +166,13 @@ def people_api(request,path,data,u):
         fresh=get_person(u,p.id,'face_search')
         if fresh.version!=p.version or not fresh.active:raise Problem('人物參考資料已更新，請重新搜尋',409)
         current={x.id:x for x in scope(fresh).filter(id__in=[f.photo_id for _,f,_ in hits[:500]])}
+        serialized={item['id']:item for item in serialize_photos(current.values(),u)}
+        active_links={l.face_id:l.id for l in PersonPhotoLink.objects.filter(person=p,face_id__in=[f.id for _,f,_ in hits[:500]],active=True)}
         for score,face,reference in hits[:500]:
             photo=current.get(face.photo_id)
             if not photo:continue
             token=signing.dumps({'person':str(p.id),'person_version':p.version,'face':str(face.id),'sha':photo.sha,'photo_version':photo.version,'model':MODEL_KEY,'actor':u.id,'reference':reference},salt='face-candidate-v1')
-            link=PersonPhotoLink.objects.filter(person=p,face=face,active=True).first()
-            results.append({'photo':serialize(photo,u),'face':str(face.id),'bbox':face.bbox,'quality':face.quality,'ordinal':face.ordinal+1,'score':round(score,5),'reference':reference,'token':token,'linked':link.id if link else None,'can_confirm':allowed(u,p.department_id,'people_manage') and not photo.dataset.archived})
+            results.append({'photo':serialized[photo.id],'face':str(face.id),'bbox':face.bbox,'quality':face.quality,'ordinal':face.ordinal+1,'score':round(score,5),'reference':reference,'token':token,'linked':active_links.get(face.id),'can_confirm':allowed(u,p.department_id,'people_manage') and not photo.dataset.archived})
         audit(u,'face_search',p.id,{'model':MODEL_KEY,'returned':len(results)})
         return JsonResponse({'person':person_data(p),'candidates':results,'matches':total,'limited':total>500,'minimum':MINIMUM,**coverage(scope(p))})
     if path=='people/confirm':
@@ -209,5 +207,7 @@ def people_api(request,path,data,u):
                 if not reason or len(reason)>2000:raise Problem('撤銷關聯須填寫理由（最多 2000 字）',422)
                 link.active=False;link.version+=1;link.save(update_fields=['active','version']);PersonLinkEvent.objects.create(link=link,actor=u,action='removed',reason=reason);audit(u,'person_link_remove',link.id)
             return JsonResponse({'ok':True})
-        return JsonResponse({'links':[{'id':l.id,'version':l.version,'active':l.active,'photo':serialize(l.face.photo,u),'bbox':l.face.bbox,'stale':l.face.source_sha!=l.face.photo.sha or l.face.model_key!=MODEL_KEY,'can_remove':allowed(u,p.department_id,'people_manage'),'events':[{'actor':e.actor.username,'action':e.action,'reason':e.reason,'at':e.created.isoformat()} for e in l.events.select_related('actor').order_by('id')]} for l in links.order_by('-id')[:500]]})
+        top_links=list(links.select_related('face__photo__uploader').prefetch_related('events__actor').order_by('-id')[:500])
+        serialized={item['id']:item for item in serialize_photos([l.face.photo for l in top_links],u)}
+        return JsonResponse({'links':[{'id':l.id,'version':l.version,'active':l.active,'photo':serialized[l.face.photo_id],'bbox':l.face.bbox,'stale':l.face.source_sha!=l.face.photo.sha or l.face.model_key!=MODEL_KEY,'can_remove':allowed(u,p.department_id,'people_manage'),'events':[{'actor':e.actor.username,'action':e.action,'reason':e.reason,'at':e.created.isoformat()} for e in sorted(l.events.all(),key=lambda e:e.id)]} for l in top_links]})
     raise Problem('找不到人物功能',404)
