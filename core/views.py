@@ -141,6 +141,7 @@ def api(request, path):
                 .prefetch_related('events__actor')
                 .order_by('-id')
             )
+            cfg = Config.objects.get_or_create(id=1)[0]
             return JsonResponse(dict(
                 user={
                     'name': u.username,
@@ -155,7 +156,12 @@ def api(request, path):
                 photos=serialize_photos(photos, u),
                 requests=serialize_requests(requests_qs, u),
                 notices=list(Notice.objects.filter(user=u).order_by('-id').values()),
-                radius=Config.objects.get_or_create(id=1)[0].radius,
+                radius=cfg.radius,
+                burst_config={
+                    'gap_seconds': cfg.burst_gap_seconds,
+                    'dhash_max': cfg.burst_dhash_max,
+                    'span_seconds': cfg.burst_span_seconds,
+                },
                 users=list(User.objects.values('id', 'username', 'is_active', 'is_superuser')) if u.is_superuser else [],
                 memberships=memberships_data() if u.is_superuser else [],
                 audits=(

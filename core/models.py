@@ -46,9 +46,20 @@ class Photo(models.Model):
     dhash=models.CharField(max_length=16,blank=True,default='')
     burst_group=models.CharField(max_length=36,blank=True,default='',db_index=True)
     burst_cover=models.BooleanField(default=False)
+    burst_cover_at=models.DateTimeField(null=True,blank=True)
+    burst_algo=models.CharField(max_length=40,blank=True,default='')
+    burst_params=models.JSONField(default=dict)
     admin_county=models.CharField(max_length=20,blank=True,default='',db_index=True)
     admin_town=models.CharField(max_length=20,blank=True,default='',db_index=True)
     admin_village=models.CharField(max_length=30,blank=True,default='')
+    class Meta:
+        constraints=[
+            models.UniqueConstraint(
+                fields=['dataset','burst_group'],
+                condition=models.Q(burst_cover=True,status='submitted')&~models.Q(burst_group=''),
+                name='uniq_submitted_burst_cover_per_group',
+            )
+        ]
 class Star(models.Model):
     user=models.ForeignKey(User,on_delete=models.CASCADE)
     photo=models.ForeignKey(Photo,on_delete=models.CASCADE)
@@ -90,6 +101,9 @@ class Notice(models.Model):
     read=models.BooleanField(default=False)
 class Config(models.Model):
     radius=models.PositiveIntegerField(default=100)
+    burst_gap_seconds=models.PositiveIntegerField(default=5)
+    burst_dhash_max=models.PositiveIntegerField(default=14)
+    burst_span_seconds=models.PositiveIntegerField(default=15)
 class Revision(models.Model):
     photo=models.ForeignKey(Photo,on_delete=models.PROTECT)
     version=models.PositiveIntegerField()

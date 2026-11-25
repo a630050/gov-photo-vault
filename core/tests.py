@@ -428,14 +428,16 @@ class BurstStackingTest(TestCase):
         from PIL import ImageDraw
         im = Image.new('RGB', (120, 90), (100, 140, 160))
         draw = ImageDraw.Draw(im)
-        draw.rectangle((10, 10, 90, 70), fill=(200 + color_shift, 150, 80))
+        draw.rectangle((10 + (color_shift % 20), 10, 90, 70), fill=(200 + color_shift, 150, 80))
         buf = io.BytesIO()
         im.save(buf, 'JPEG')
         buf.seek(0)
         buf.name = name
         up = self.client.post('/api/upload', {'dataset': self.ds.id, 'files': buf})
         self.assertEqual(up.status_code, 200)
-        pid = up.json()['results'][0]['id']
+        res0 = up.json()['results'][0]
+        self.assertIn('id', res0, f'Upload failed for {name}: {res0}')
+        pid = res0['id']
         p = Photo.objects.get(id=pid)
         sub = self.client.post(
             '/api/submit',
@@ -477,6 +479,164 @@ class BurstStackingTest(TestCase):
             content_type='application/json',
         )
         self.assertEqual(r_denied.status_code, 403)
+
+    def test_burst_span_limit_and_recompute_consistency(self):
+        from core.models import Config
+        cfg, _ = Config.objects.get_or_create(id=1)
+        cfg.burst_gap_seconds = 5
+        cfg.burst_span_seconds = 10
+        cfg.burst_dhash_max = 14
+        cfg.save()
+
+        # Neighboring gaps are 4s (<=5s), but t=12s exceeds span 10s from t=0s
+        p0 = self._upload_and_submit('s0.jpg', 0, '2026-11-24T11:00:00+08:00')
+        p1 = self._upload_and_submit('s1.jpg', 2, '2026-11-24T11:00:04+08:00')
+        p2 = self._upload_and_submit('s2.jpg', 4, '2026-11-24T11:00:08+08:00')
+        p3 = self._upload_and_submit('s3.jpg', 6, '2026-11-24T11:00:12+08:00')
+        for p in (p0, p1, p2, p3):
+            p.refresh_from_db()
+        self.assertTrue(p0.burst_group)
+        self.assertEqual(p0.burst_group, p1.burst_group)
+        self.assertEqual(p0.burst_group, p2.burst_group)
+        self.assertEqual(p3.burst_group, '')
+
+        # Adding another photo at t=15s forms a second group [p3, p4] with p3
+        p4 = self._upload_and_submit('s4.jpg', 8, '2026-11-24T11:00:15+08:00')
+        p3.refresh_from_db()
+        p4.refresh_from_db()
+        self.assertTrue(p3.burst_group)
+        self.assertEqual(p3.burst_group, p4.burst_group)
+        self.assertNotEqual(p3.burst_group, p0.burst_group)
+
+        # Admin recompute produces identical deterministic grouping
+        admin = User.objects.create_superuser('adm_b', password='p')
+        self.client.force_login(admin)
+        rec = self.client.post(
+            '/api/burst_recompute',
+            data=json.dumps({'dataset': self.ds.id}),
+            content_type='application/json',
+        )
+        self.assertEqual(rec.status_code, 200)
+        p0_after = Photo.objects.get(id=p0.id)
+        p3_after = Photo.objects.get(id=p3.id)
+        self.assertEqual(p0_after.burst_group, p0.burst_group)
+        self.assertEqual(p3_after.burst_group, p3.burst_group)
+
+    def test_burst_lifecycle_on_correct_move_recycle_restore_and_unique_cover(self):
+        from django.db import IntegrityError, transaction
+        sup = User.objects.create_user('sup_b', password='p')
+        Membership.objects.create(user=sup, department=self.dep, role='supervisor')
+        ds2 = Dataset.objects.create(item=self.item, name='第二活動', creator=self.member)
+
+        p1 = self._upload_and_submit('l1.jpg', 0, '2026-11-24T12:00:00+08:00')
+        p2 = self._upload_and_submit('l2.jpg', 3, '2026-11-24T12:00:02+08:00')
+        p3 = self._upload_and_submit('l3.jpg', 6, '2026-11-24T12:00:04+08:00')
+
+        # Designate p2 as manual cover
+        self.client.post('/api/burst_cover', data=json.dumps({'photo': p2.id}), content_type='application/json')
+        p2.refresh_from_db()
+        self.assertTrue(p2.burst_cover)
+
+        # DB-level constraint prevents two active covers in the same group
+        with self.assertRaises(IntegrityError), transaction.atomic():
+            Photo.objects.filter(id=p1.id).update(burst_cover=True)
+
+        # 1) Correct p2's time outside the window -> p2 exits group, p1 becomes fallback cover
+        req_c = self.client.post(
+            '/api/request',
+            data=json.dumps({
+                'photo': p2.id, 'version': p2.version, 'kind': 'correct', 'reason': '時間誤植',
+                'payload': {'captured': '2026-11-24T13:00:00+08:00', 'time_confirmed': True, 'attrs': {}},
+            }),
+            content_type='application/json',
+        )
+        self.assertEqual(req_c.status_code, 200)
+        self.client.force_login(sup)
+        r_id = Request.objects.order_by('-id').first().id
+        dec_c = self.client.post(
+            '/api/decision',
+            data=json.dumps({'id': r_id, 'decision': 'approve', 'reason': 'ok'}),
+            content_type='application/json',
+        )
+        self.assertEqual(dec_c.status_code, 200)
+        p1.refresh_from_db(); p2.refresh_from_db(); p3.refresh_from_db()
+        self.assertEqual(p2.burst_group, '')
+        self.assertFalse(p2.burst_cover)
+        self.assertTrue(p1.burst_group)
+        self.assertEqual(p1.burst_group, p3.burst_group)
+        self.assertTrue(p1.burst_cover)
+
+        # 2) Move p3 to ds2 -> p3 leaves old group and p1 becomes ungrouped
+        self.client.force_login(self.member)
+        self.client.post(
+            '/api/request',
+            data=json.dumps({'photo': p3.id, 'version': p3.version, 'kind': 'move', 'reason': '搬移', 'payload': {'dataset': ds2.id}}),
+            content_type='application/json',
+        )
+        self.client.force_login(sup)
+        r_move = Request.objects.order_by('-id').first().id
+        self.client.post('/api/decision', data=json.dumps({'id': r_move, 'decision': 'approve', 'reason': 'ok'}), content_type='application/json')
+        p1.refresh_from_db(); p3.refresh_from_db()
+        self.assertEqual(p1.burst_group, '')
+        self.assertEqual(p3.burst_group, '')
+
+        # 3) Search partial match count vs total group count
+        self.client.force_login(self.member)
+        p_a = self._upload_and_submit('m1.jpg', 10, '2026-11-24T14:00:00+08:00')
+        p_b = self._upload_and_submit('m2.jpg', 12, '2026-11-24T14:00:02+08:00')
+        p_a.refresh_from_db()
+        self.assertTrue(p_a.burst_group)
+        self.client.post('/api/tags', data=json.dumps({'photo': p_a.id, 'tags': ['精選篩選']}), content_type='application/json')
+        s = self.client.post('/api/search', data=json.dumps({'tags': ['精選篩選']}), content_type='application/json').json()
+        self.assertEqual(s['burst_matched_counts'][p_a.burst_group], 1)
+        self.assertEqual(s['photos'][0]['burst_total_count'], 2)
+
+        # 4) Recycle p_a -> remaining p_b ungroups; Restore p_a -> regroups with p_b
+        self.client.post('/api/request', data=json.dumps({'photo': p_a.id, 'version': p_a.version, 'kind': 'delete', 'reason': 'del', 'payload': {}}), content_type='application/json')
+        self.client.force_login(sup)
+        r_del = Request.objects.order_by('-id').first().id
+        self.client.post('/api/decision', data=json.dumps({'id': r_del, 'decision': 'approve', 'reason': 'del'}), content_type='application/json')
+        p_a.refresh_from_db(); p_b.refresh_from_db()
+        self.assertEqual(p_a.status, 'recycled')
+        self.assertEqual(p_a.burst_group, '')
+        self.assertEqual(p_b.burst_group, '')
+
+        self.client.post('/api/restore', data=json.dumps({'photo': p_a.id}), content_type='application/json')
+        p_a.refresh_from_db(); p_b.refresh_from_db()
+        self.assertEqual(p_a.status, 'submitted')
+        self.assertTrue(p_a.burst_group)
+        self.assertEqual(p_a.burst_group, p_b.burst_group)
+
+    def test_burst_merge_conflict_resolves_to_latest_manual_cover_and_audits(self):
+        from core.models import Audit, Config
+        cfg, _ = Config.objects.get_or_create(id=1)
+        cfg.burst_gap_seconds = 5
+        cfg.burst_span_seconds = 20
+        cfg.burst_dhash_max = 14
+        cfg.save()
+
+        # Two separate groups: [t=0, t=2] and [t=10, t=12] (gap 8s > 5s)
+        g1a = self._upload_and_submit('g1a.jpg', 0, '2026-11-24T15:00:00+08:00')
+        g1b = self._upload_and_submit('g1b.jpg', 2, '2026-11-24T15:00:02+08:00')
+        g2a = self._upload_and_submit('g2a.jpg', 4, '2026-11-24T15:00:10+08:00')
+        g2b = self._upload_and_submit('g2b.jpg', 6, '2026-11-24T15:00:12+08:00')
+
+        r_c1 = self.client.post('/api/burst_cover', data=json.dumps({'photo': g1b.id}), content_type='application/json')
+        self.assertEqual(r_c1.status_code, 200, r_c1.json())
+        r_c2 = self.client.post('/api/burst_cover', data=json.dumps({'photo': g2b.id}), content_type='application/json')
+        self.assertEqual(r_c2.status_code, 200, r_c2.json())
+
+        # Bridge photos at t=5s and t=7s merge all into one group within span 12s <= 20s
+        self._upload_and_submit('br1.jpg', 3, '2026-11-24T15:00:05+08:00')
+        self._upload_and_submit('br2.jpg', 5, '2026-11-24T15:00:07+08:00')
+
+        for p in (g1a, g1b, g2a, g2b):
+            p.refresh_from_db()
+        self.assertEqual(len({g1a.burst_group, g1b.burst_group, g2a.burst_group, g2b.burst_group}), 1)
+        covers = list(Photo.objects.filter(dataset=self.ds, burst_group=g1a.burst_group, burst_cover=True))
+        self.assertIn(covers[0].id, [g1b.id, g2b.id], [(p.id, p.burst_cover, str(p.burst_cover_at)) for p in (g1a, g1b, g2a, g2b)])
+        self.assertEqual([c.id for c in covers], [g2b.id])
+        self.assertTrue(Audit.objects.filter(action='burst_cover_conflict_resolved').exists())
 
 
 class ReverseGeocodingTest(TestCase):

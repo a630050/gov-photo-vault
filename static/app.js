@@ -30,25 +30,41 @@ function drawCards(list){
    }else{display.push(p)}
   }
  }else{display.push(...list)}
- $('#cards').innerHTML=display.length?display.map(p=>{const g=burstMap.get(p.id);return `<article class="photo ${g?'is-burst-stack':''}" data-open="${p.id}">${g?`<button type="button" class="burst-badge" data-burst-open="${p.id}">${p.burst_cover?'★ 精選 · ':''}連拍 ${g.length} 張</button>`:''}<img loading="lazy" src="${p.preview}" alt="${esc(p.name)}"><div class="caption"><div style="float:right"><input type="checkbox" data-select="${p.id}" ${selected.has(p.id)?'checked':''}></div><strong>${p.star?'★ ':''}${esc(p.name)}</strong><div class="muted">${esc(ds(p.dataset)?.name)} · ${p.captured?esc(new Date(p.captured).toLocaleString('zh-TW')):'待補拍攝時間'}</div>${p.county?`<span class="badge">${esc(p.county)}${esc(p.town)}</span>`:''}${p.tags.map(t=>`<span class="badge">${esc(t)}</span>`).join('')}${p.lat==null?'<span class="badge warn">待補定位</span>':''}${p.anomalies.length?'<span class="badge warn">異常紀錄</span>':''}</div></article>`}).join(''):'<div class="empty">此範圍尚無照片。可先到上傳頁加入照片，或調整篩選條件。</div>';
+ const matchedByGroup=typeof libraryState!=='undefined'?(libraryState.summary?.burst_matched_counts||{}):{};
+ $('#cards').innerHTML=display.length?display.map(p=>{
+  const g=burstMap.get(p.id);
+  const matchedCount=g?g.length:(p.burst_group?(matchedByGroup[p.burst_group]||1):1);
+  const totalCount=p.burst_group?Math.max(matchedCount,p.burst_total_count||matchedCount):1;
+  const partial=p.burst_group&&totalCount>1&&matchedCount<totalCount;
+  const selectedInGroup=g?g.filter(x=>selected.has(x.id)).length:(selected.has(p.id)?1:0);
+  const allGroupSelected=g&&selectedInGroup===g.length;
+  const badgeText=g?(partial?`${p.burst_cover?'★ 精選 · ':''}符合 ${g.length} / 共 ${totalCount} 張`:`${p.burst_cover?'★ 精選 · ':''}連拍 ${totalCount} 張`):'';
+  return `<article class="photo ${g?'is-burst-stack':''}" data-open="${p.id}">${g?`<button type="button" class="burst-badge" data-burst-open="${p.id}" title="展開檢視與設為精選首圖">${badgeText}</button>`:''}<img loading="lazy" src="${p.preview}" alt="${esc(p.name)}"><div class="caption"><div style="float:right"><input type="checkbox" data-select="${p.id}" ${selected.has(p.id)?'checked':''} title="${g?'選取這張（僅封面）':'選取這張'}" aria-label="${g?'選取這張（僅封面）':'選取'} ${esc(p.name)}"></div><strong>${p.star?'★ ':''}${esc(p.name)}</strong><div class="muted">${esc(ds(p.dataset)?.name)} · ${p.captured?esc(new Date(p.captured).toLocaleString('zh-TW')):'待補拍攝時間'}</div>${!g&&partial?`<span class="badge warn">符合 ${matchedCount} / 共 ${totalCount} 張</span>`:''}${p.county?`<span class="badge">${esc(p.county)}${esc(p.town)}</span>`:''}${p.tags.map(t=>`<span class="badge">${esc(t)}</span>`).join('')}${p.lat==null?'<span class="badge warn">待補定位</span>':''}${p.anomalies.length?'<span class="badge warn">異常紀錄</span>':''}${g?`<div class="burst-card-actions"><span class="muted">已選 ${selectedInGroup}/${g.length} 張</span><button type="button" data-select-group="${p.id}">${allGroupSelected?'取消整組':'選取整組 ('+g.length+')'}</button></div>`:''}</div></article>`;
+ }).join(''):'<div class="empty">此範圍尚無照片。可先到上傳頁加入照片，或調整篩選條件。</div>';
  document.querySelectorAll('[data-open]').forEach(x=>x.onclick=()=>{const g=burstMap.get(+x.dataset.open);if(g)openBurstModal(g);else openPhoto(+x.dataset.open)});
  document.querySelectorAll('[data-burst-open]').forEach(b=>b.onclick=e=>{e.stopPropagation();const g=burstMap.get(+b.dataset.burstOpen);if(g)openBurstModal(g)});
- document.querySelectorAll('[data-select]').forEach(x=>x.onclick=e=>{e.stopPropagation();x.checked?selected.add(+x.dataset.select):selected.delete(+x.dataset.select);$('.selected-count').textContent=`已選 ${selected.size} 張`});
+ document.querySelectorAll('[data-select]').forEach(x=>x.onclick=e=>{e.stopPropagation();x.checked?selected.add(+x.dataset.select):selected.delete(+x.dataset.select);if(typeof drawLibraryResults==='function'&&tab==='library')drawLibraryResults();else $('.selected-count').textContent=`已選 ${selected.size} 張`});
+ document.querySelectorAll('[data-select-group]').forEach(b=>b.onclick=e=>{e.stopPropagation();const g=burstMap.get(+b.dataset.selectGroup);if(!g)return;const allSelected=g.every(x=>selected.has(x.id));for(const x of g){if(allSelected)selected.delete(x.id);else selected.add(x.id)}if(typeof drawLibraryResults==='function'&&tab==='library')drawLibraryResults();toast(allSelected?`已取消選取該連拍組 ${g.length} 張`:`已選取該連拍組符合條件的 ${g.length} 張`)});
 }
 function openBurstModal(group){
  document.querySelector('.ux-dialog-backdrop')?.remove();
  const m=document.createElement('div');m.className='form-preview-backdrop ux-dialog-backdrop';
  const sorted=[...group].sort((a,b)=>(a.captured||'').localeCompare(b.captured||'')||a.id-b.id);
+ const totalCount=Math.max(sorted.length,sorted[0]?.burst_total_count||sorted.length);
  function renderModal(){
-  m.innerHTML=`<section class="card ux-dialog ux-burst-dialog" role="dialog" aria-modal="true" aria-label="連拍照片組"><div class="toolbar"><h2>連拍照片組（共 ${sorted.length} 張）</h2><button type="button" data-ux-close>關閉 Esc</button></div><p class="muted">系統依拍攝時間近鄰（5 秒內）與影像指紋相似自動收合。可挑選最佳照片設為「精選首圖」。</p><div class="burst-grid">${sorted.map(p=>`<article class="burst-item ${p.burst_cover?'is-cover':''}"><img src="${p.preview}" alt="${esc(p.name)}" loading="lazy"><div class="burst-item-info"><strong>${esc(p.name)}</strong><span class="muted">${p.captured?esc(new Date(p.captured).toLocaleString('zh-TW',{timeZone:'Asia/Taipei'})):'無拍攝時間'}</span>${p.burst_cover?'<span class="badge">★ 目前精選首圖</span>':''}<div class="row" style="margin-top:8px"><button type="button" data-burst-view="${p.id}">檢視大圖</button>${(p.can_write&&!ds(p.dataset)?.archived&&!p.burst_cover)?`<button type="button" class="primary" data-burst-cover="${p.id}">★ 設為精選首圖</button>`:''}</div></div></article>`).join('')}</div></section>`;
+  const selectedInGroup=sorted.filter(x=>selected.has(x.id)).length;
+  const allSelected=selectedInGroup===sorted.length;
+  m.innerHTML=`<section class="card ux-dialog ux-burst-dialog" role="dialog" aria-modal="true" aria-label="連拍照片組"><div class="toolbar"><h2>連拍照片組（目前符合 ${sorted.length}／可閱覽共 ${totalCount} 張）</h2><button type="button" id="burst-modal-select-group">${allSelected?'取消整組選取':'選取整組符合條件 ('+sorted.length+' 張)'}</button><button type="button" data-ux-close>關閉 Esc</button></div><p class="muted">系統依拍攝時間差與影像指紋自動收合；僅對目前符合搜尋條件的 ${sorted.length} 張進行選取。已選 ${selectedInGroup} 張。</p><div class="burst-grid">${sorted.map(p=>`<article class="burst-item ${p.burst_cover?'is-cover':''}"><img src="${p.preview}" alt="${esc(p.name)}" loading="lazy"><div class="burst-item-info"><label class="check" style="margin:0 0 6px"><input type="checkbox" data-burst-select="${p.id}" ${selected.has(p.id)?'checked':''}><strong>${esc(p.name)}</strong></label><span class="muted">${p.captured?esc(new Date(p.captured).toLocaleString('zh-TW',{timeZone:'Asia/Taipei'})):'無拍攝時間'}</span>${p.burst_cover?`<span class="badge">★ ${p.burst_cover_manual?'人工精選首圖':'目前封面首圖'}</span>`:''}<div class="row" style="margin-top:8px"><button type="button" data-burst-view="${p.id}">檢視大圖</button>${(p.can_write&&!ds(p.dataset)?.archived&&!p.burst_cover)?`<button type="button" class="primary" data-burst-cover="${p.id}">★ 設為精選首圖</button>`:''}</div></div></article>`).join('')}</div></section>`;
   m.querySelectorAll('[data-ux-close]').forEach(b=>b.onclick=()=>m.remove());
+  $('#burst-modal-select-group').onclick=()=>{for(const x of sorted){if(allSelected)selected.delete(x.id);else selected.add(x.id)}renderModal();if(typeof drawLibraryResults==='function'&&tab==='library')drawLibraryResults()};
+  m.querySelectorAll('[data-burst-select]').forEach(cb=>cb.onchange=()=>{const pid=+cb.dataset.burstSelect;if(cb.checked)selected.add(pid);else selected.delete(pid);renderModal();if(typeof drawLibraryResults==='function'&&tab==='library')drawLibraryResults()});
   m.querySelectorAll('[data-burst-view]').forEach(b=>b.onclick=()=>openPhoto(+b.dataset.burstView));
   m.querySelectorAll('[data-burst-cover]').forEach(b=>b.onclick=()=>action(async()=>{
    const pid=+b.dataset.burstCover;
    await api('burst_cover',{photo:pid});
    const gid=sorted[0].burst_group;
-   for(const ph of state.photos)if(ph.burst_group===gid)ph.burst_cover=(ph.id===pid);
-   for(const ph of sorted)ph.burst_cover=(ph.id===pid);
+   for(const ph of state.photos)if(ph.burst_group===gid){ph.burst_cover=(ph.id===pid);ph.burst_cover_manual=(ph.id===pid)}
+   for(const ph of sorted){ph.burst_cover=(ph.id===pid);ph.burst_cover_manual=(ph.id===pid)}
    renderModal();
    if(typeof drawLibraryResults==='function')drawLibraryResults();
    toast('已更新連拍組的精選首圖');
@@ -56,6 +72,15 @@ function openBurstModal(group){
  }
  document.body.append(m);
  renderModal();
+}
+function openConfirmDialog({title,message,confirmLabel='確認執行',onConfirm}){
+ document.querySelector('.ux-dialog-backdrop')?.remove();
+ const m=document.createElement('div');m.className='form-preview-backdrop ux-dialog-backdrop';
+ m.innerHTML=`<section class="card ux-dialog" role="dialog" aria-modal="true" aria-label="${esc(title)}"><div class="toolbar"><h2>${esc(title)}</h2><button type="button" data-ux-close>關閉</button></div><p>${esc(message)}</p><div class="row" style="margin-top:16px"><button type="button" data-ux-close>取消</button><button type="button" id="ux-confirm-ok" class="primary">${esc(confirmLabel)}</button></div></section>`;
+ document.body.append(m);
+ const ok=$('#ux-confirm-ok');ok.focus();
+ m.querySelectorAll('[data-ux-close]').forEach(b=>b.onclick=()=>m.remove());
+ ok.onclick=()=>action(async()=>{ok.disabled=true;try{await onConfirm();m.remove()}finally{if(ok.isConnected)ok.disabled=false}});
 }
 function attachBaseMaps(targetMap){
  const Grid=L.GridLayer.extend({createTile(c){const t=document.createElement('canvas');t.width=t.height=256;const ctx=t.getContext('2d');ctx.fillStyle='#eaf0ec';ctx.fillRect(0,0,256,256);ctx.strokeStyle='#cbd8d1';ctx.strokeRect(0,0,256,256);ctx.fillStyle='#8da097';ctx.font='11px sans-serif';ctx.fillText(`Z${c.z} / ${c.x} / ${c.y}`,12,22);return t}});

@@ -162,11 +162,41 @@ def handle_admin_api(path, data, u):
     if path == 'config':
         if not u.is_superuser:
             raise Problem('需要管理者權限', 403)
-        radius = int(data['radius'])
-        if radius < 100:
-            raise Problem('半徑不得小於 100 公尺')
-        Config.objects.update_or_create(id=1, defaults={'radius': radius})
-        audit(u, path, 1, {'radius': radius})
+        cfg, _ = Config.objects.get_or_create(id=1)
+        if 'radius' in data:
+            radius = int(data['radius'])
+            if radius < 100:
+                raise Problem('半徑不得小於 100 公尺')
+            cfg.radius = radius
+        if 'burst_gap_seconds' in data:
+            gap = int(data['burst_gap_seconds'])
+            if not 1 <= gap <= 300:
+                raise Problem('連拍相鄰時間差須介於 1 至 300 秒')
+            cfg.burst_gap_seconds = gap
+        if 'burst_dhash_max' in data:
+            dmax = int(data['burst_dhash_max'])
+            if not 0 <= dmax <= 32:
+                raise Problem('連拍指紋距離門檻須介於 0 至 32')
+            cfg.burst_dhash_max = dmax
+        if 'burst_span_seconds' in data:
+            span = int(data['burst_span_seconds'])
+            if not 1 <= span <= 3600:
+                raise Problem('連拍整組最大跨度須介於 1 至 3600 秒')
+            cfg.burst_span_seconds = span
+        if cfg.burst_span_seconds < cfg.burst_gap_seconds:
+            raise Problem('整組最大時間跨度不得小於相鄰時間差')
+        cfg.save()
+        audit(
+            u,
+            path,
+            1,
+            {
+                'radius': cfg.radius,
+                'burst_gap_seconds': cfg.burst_gap_seconds,
+                'burst_dhash_max': cfg.burst_dhash_max,
+                'burst_span_seconds': cfg.burst_span_seconds,
+            },
+        )
         return JsonResponse({'ok': True})
 
     if path == 'user':

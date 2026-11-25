@@ -25,6 +25,7 @@ from .helpers import (
 )
 from .models import Anomaly, Dataset, Export, Notice, Photo, Request, RequestEvent
 from .permissions import allowed
+from .burst import reconcile_burst_scope
 
 
 def cleanup_expired_exports():
@@ -60,9 +61,15 @@ def handle_workflow_api(path, data, u):
             if p.version != r.base_version or p.status != 'submitted':
                 raise Problem('照片已變動，請駁回並重新申請', 409)
             revision(p, u)
+            old_dataset_id = p.dataset_id
+            old_group = p.burst_group
+            old_captured = p.captured
             if r.kind == 'delete':
                 p.previous_status = p.status
                 p.status = 'recycled'
+                p.burst_group = ''
+                p.burst_cover = False
+                p.burst_cover_at = None
                 for other in Request.objects.filter(photo=p, state='pending').exclude(id=r.id):
                     other.state = 'invalidated'
                     other.closed_at = timezone.now()
@@ -85,8 +92,42 @@ def handle_workflow_api(path, data, u):
                 if dest.item_id != p.dataset.item_id or dest.archived:
                     raise Problem('只能移至同項目未封存資料集')
                 p.dataset = dest
+                p.burst_group = ''
+                p.burst_cover = False
+                p.burst_cover_at = None
             p.version += 1
             p.save()
+            if r.kind == 'delete' and old_group:
+                reconcile_burst_scope(
+                    old_dataset_id,
+                    time_anchors=[old_captured],
+                    old_group_ids=[old_group],
+                    actor=u,
+                    reason='recycled',
+                )
+            elif r.kind == 'correct' and (old_captured != p.captured or old_group):
+                reconcile_burst_scope(
+                    p.dataset_id,
+                    time_anchors=[old_captured, p.captured],
+                    old_group_ids=[old_group],
+                    actor=u,
+                    reason='correct',
+                )
+            elif r.kind == 'move':
+                if old_group:
+                    reconcile_burst_scope(
+                        old_dataset_id,
+                        time_anchors=[old_captured],
+                        old_group_ids=[old_group],
+                        actor=u,
+                        reason='move_out',
+                    )
+                reconcile_burst_scope(
+                    p.dataset_id,
+                    time_anchors=[p.captured],
+                    actor=u,
+                    reason='move_in',
+                )
         r.state = state
         r.reviewer = u
         r.decision_reason = data.get('reason', '')

@@ -122,3 +122,14 @@
 - [ ] 備份獨立設備、加密、保留政策、遠端告警及跨設備還原的 RPO／RTO 驗收。
 
 整合證據：`.runtime/ops-drill-22f9243eaa/drill-result.json`。本機部署示範：8010，既有開發系統：8000，兩者資料分離。
+
+
+## 擴充規格書第一批次交付紀錄（連拍一致性與堆疊選取）
+
+* **資料遷移**：`core/migrations/0013_config_burst_dhash_max_config_burst_gap_seconds_and_more.py`（含 `deduplicate_burst_covers` 無損規範化，完整保留既有照片、群組與人工首圖）。
+* **程式已實作／本機已驗證**：
+  * [x] 連拍參數（`burst_gap_seconds`、`burst_dhash_max`、`burst_span_seconds`）可由系統管理者設定並驗證範圍，分組保存演算法 `dhash64-window-v2` 與參數快照。
+  * [x] 更正時間、搬移資料集、回收、復原及管理者重算後，受影響閉包重算確定性一致且搬移後必退出原資料集群組。
+  * [x] 資料庫唯一約束 `uniq_submitted_burst_cover_per_group` 與交易鎖防護併發多首圖，合併衝突與首圖遺失依固定規則裁決並留存稽核。
+  * [x] 堆疊卡片顯示「符合 M / 共 N 張」，區分「選取這張」、「選取整組」與「選取目前結果」，條件變更清除選取，批次操作前確認實際張數。
+* **正式環境驗收狀態**：尚未進行正式環境（PostgreSQL/PostGIS + 正式內網 SMB + 萬筆負載）驗收，將於第二、三批次完成後一併整合驗收。

@@ -91,9 +91,12 @@ def search_photos(queryset, user, criteria):
     if not isinstance(tags,list) or any(not isinstance(t,str) for t in tags):raise SearchError('標籤條件格式錯誤')
     rows=[p for p in q.order_by(F('captured').desc(nulls_last=True),'-id') if (not tags or any(t in p.tags for t in tags)) and all(custom_match(p,rule) for rule in rules)]
     region_counts={}
+    burst_counts={}
     for p in rows:
         if p.admin_county:
             key=(p.admin_county,p.admin_town)
             region_counts[key]=region_counts.get(key,0)+1
+        if p.burst_group and p.status=='submitted':
+            burst_counts[p.burst_group]=burst_counts.get(p.burst_group,0)+1
     region_stats=[{'county':c,'town':t,'count':n} for (c,t),n in sorted(region_counts.items(),key=lambda kv:(-kv[1],kv[0][0],kv[0][1]))]
-    return {'ids':[p.id for p in rows],'total':len(rows),'located':sum(p.lat is not None and p.lon is not None for p in rows),'missing_location':sum(p.lat is None or p.lon is None for p in rows),'excluded_missing_time':sum((not tags or any(t in p.tags for t in tags)) and all(custom_match(p,rule) for rule in rules) for p in missing_time) if start or end else 0,'region_stats':region_stats}
+    return {'ids':[p.id for p in rows],'total':len(rows),'located':sum(p.lat is not None and p.lon is not None for p in rows),'missing_location':sum(p.lat is None or p.lon is None for p in rows),'excluded_missing_time':sum((not tags or any(t in p.tags for t in tags)) and all(custom_match(p,rule) for rule in rules) for p in missing_time) if start or end else 0,'region_stats':region_stats,'burst_matched_counts':burst_counts}

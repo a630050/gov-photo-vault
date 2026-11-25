@@ -2,7 +2,7 @@ import math
 import re
 from datetime import datetime
 from zoneinfo import ZoneInfo
-from django.db.models import Q
+from django.db.models import Count, Q
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 from .models import Audit, Anomaly, Membership, PersonPhotoLink, Request, Revision, Star, Photo
@@ -185,6 +185,18 @@ def serialize_photos(photos, u):
                     'bbox': link.face.bbox,
                 })
 
+    group_totals = {}
+    burst_keys = {(p.dataset_id, p.burst_group) for p in rows if p.burst_group and p.status == 'submitted'}
+    if burst_keys:
+        ds_ids = {d for d, _ in burst_keys}
+        g_ids = {g for _, g in burst_keys}
+        for row in (
+            Photo.objects.filter(status='submitted', dataset_id__in=ds_ids, burst_group__in=g_ids)
+            .values('dataset_id', 'burst_group')
+            .annotate(total=Count('id'))
+        ):
+            group_totals[(row['dataset_id'], row['burst_group'])] = row['total']
+
     result = []
     for p in rows:
         dept_id = p.dataset.item.department_id
@@ -210,6 +222,10 @@ def serialize_photos(photos, u):
             version=p.version,
             burst_group=p.burst_group,
             burst_cover=p.burst_cover,
+            burst_cover_manual=bool(p.burst_cover and p.burst_cover_at is not None),
+            burst_total_count=group_totals.get((p.dataset_id, p.burst_group), 1) if p.burst_group and p.status == 'submitted' else 1,
+            burst_algo=p.burst_algo,
+            burst_params=p.burst_params,
             county=p.admin_county,
             town=p.admin_town,
             village=p.admin_village,

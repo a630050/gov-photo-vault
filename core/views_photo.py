@@ -7,6 +7,7 @@ from django.contrib.auth.models import User
 from django.core.files.base import ContentFile
 from django.db import transaction
 from django.http import JsonResponse
+from django.utils import timezone
 from .helpers import (
     Problem,
     audit,
@@ -21,7 +22,7 @@ from .helpers import (
     writable,
 )
 from .image_metadata import extract_metadata
-from .burst import assign_burst_group, compute_dhash_from_image
+from .burst import assign_burst_group, compute_dhash_from_image, reconcile_burst_scope
 from .models import Anomaly, Dataset, Membership, Notice, Photo, Request, RequestEvent, Star, TagAssertion
 from .permissions import allowed
 
@@ -174,7 +175,7 @@ def handle_photo_api(request, path, data, u):
                     p.version += 1
                     p.save()
                     if submit:
-                        assign_burst_group(p)
+                        assign_burst_group(p, actor=u)
                     audit(u, 'submit' if submit else 'save', p.id)
                 results.append({'id': p.id, 'name': name, 'ok': True})
             except Problem as e:
@@ -200,6 +201,8 @@ def handle_photo_api(request, path, data, u):
             p.status = p.previous_status
             p.version += 1
             p.save()
+            if p.status == 'submitted':
+                reconcile_burst_scope(p.dataset_id, time_anchors=[p.captured], actor=u, reason='restored')
         else:
             if path == 'request':
                 if not writable(u, p.dataset.item.department_id):
@@ -214,8 +217,13 @@ def handle_photo_api(request, path, data, u):
                 if data.get('version') != p.version:
                     raise Problem('資料已變動，請重新載入', 409)
                 if path == 'discard':
+                    old_group = p.burst_group
+                    old_cap = p.captured
                     p.previous_status = 'draft'
                     p.status = 'recycled'
+                    p.burst_group = ''
+                    p.burst_cover = False
+                    p.burst_cover_at = None
                 else:
                     for k, v in metadata(data).items():
                         setattr(p, k, v)
@@ -226,7 +234,15 @@ def handle_photo_api(request, path, data, u):
                 p.version += 1
                 p.save()
                 if path == 'submit':
-                    assign_burst_group(p)
+                    assign_burst_group(p, actor=u)
+                elif path == 'discard' and old_group:
+                    reconcile_burst_scope(
+                        p.dataset_id,
+                        time_anchors=[old_cap],
+                        old_group_ids=[old_group],
+                        actor=u,
+                        reason='recycled',
+                    )
             elif path == 'tags':
                 tags = [str(t).strip()[:60] for t in data.get('tags', []) if str(t).strip()]
                 batch = data.get('batch') or str(uuid.uuid4())
@@ -284,15 +300,37 @@ def handle_photo_api(request, path, data, u):
 
     if path == 'burst_cover':
         p = photo(u, data['photo'])
+        Dataset.objects.select_for_update().get(id=p.dataset_id)
         p = Photo.objects.select_for_update().select_related('dataset__item').get(id=p.id)
         editable(u, p, 'organize')
         if p.status != 'submitted' or not p.burst_group:
             raise Problem('此照片不屬於已提交的連拍組', 409)
-        Photo.objects.filter(dataset_id=p.dataset_id, burst_group=p.burst_group).exclude(id=p.id).update(burst_cover=False)
-        if not p.burst_cover:
-            p.burst_cover = True
-            p.save(update_fields=['burst_cover'])
-        audit(u, 'burst_cover', p.id, {'burst_group': p.burst_group})
+        now = timezone.now()
+        Photo.objects.select_for_update().filter(
+            dataset_id=p.dataset_id, burst_group=p.burst_group
+        ).exclude(id=p.id).update(burst_cover=False, burst_cover_at=None)
+        p.burst_cover = True
+        p.burst_cover_at = now
+        p.save(update_fields=['burst_cover', 'burst_cover_at'])
+        audit(u, 'burst_cover', p.id, {'burst_group': p.burst_group, 'algo': p.burst_algo})
         return JsonResponse({'ok': True, 'burst_group': p.burst_group})
+
+    if path == 'burst_recompute':
+        if not u.is_superuser:
+            raise Problem('僅系統管理者可重新計算連拍群組', 403)
+        ds_id = data.get('dataset')
+        if ds_id:
+            ds = Dataset.objects.filter(id=int(ds_id)).first()
+            if not ds:
+                raise Problem('找不到資料集', 404)
+            stats = reconcile_burst_scope(ds.id, actor=u, reason='recompute', recompute_all=True)
+            return JsonResponse({'ok': True, **stats})
+        total_processed = 0
+        total_groups = 0
+        for ds in Dataset.objects.all().order_by('id'):
+            st = reconcile_burst_scope(ds.id, actor=u, reason='recompute', recompute_all=True)
+            total_processed += st['processed']
+            total_groups += st['groups']
+        return JsonResponse({'ok': True, 'processed': total_processed, 'groups': total_groups})
 
     return None
