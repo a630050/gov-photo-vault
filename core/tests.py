@@ -15,7 +15,10 @@ class CoreTests(TestCase):
     def post(self,path,data):return self.client.post('/api/'+path,json.dumps(data),content_type='application/json')
     def test_scope_and_direct_asset(self):
         self.client.force_login(self.out)
-        self.assertEqual(self.client.get('/api/state').json()['photos'],[])
+        s=self.client.get('/api/state').json()
+        self.assertNotIn('photos',s)
+        self.assertEqual(s['summary']['visible_photos'],0)
+        self.assertEqual(self.post('search',{}).json()['photos'],[])
         self.assertEqual(self.client.get(f'/media/{self.p.id}/preview').status_code,404)
         self.assertEqual(self.post('star',{'photo':self.p.id}).status_code,404)
     def test_delete_review_restore_invalidates(self):
@@ -59,7 +62,7 @@ class CoreTests(TestCase):
         self.assertIn('photo_ops_session',c.cookies)
     def test_stars_private_and_deactivation(self):
         self.post('star',{'photo':self.p.id});self.client.force_login(self.boss)
-        self.assertFalse(self.client.get('/api/state').json()['photos'][0]['star'])
+        self.assertFalse(self.post('search',{}).json()['photos'][0]['star'])
         self.boss.is_active=False;self.boss.save();self.assertEqual(self.client.get('/api/state').status_code,401)
     def test_tag_undo_preserves_other_assertion(self):
         self.post('tags',{'photo':self.p.id,'tags':['積水'],'batch':'first'})
@@ -175,7 +178,7 @@ class PermissionWorkflowTests(TestCase):
     def test_revoke_membership_removes_scope_immediately(self):
         admin=User.objects.create_superuser('admin',password='test');c=Client();c.force_login(admin)
         self.assertEqual(c.post('/api/membership',json.dumps({'user':self.member.id,'department':self.d.id,'remove':True}),content_type='application/json').status_code,200)
-        self.assertEqual(self.client.get('/api/state').json()['photos'],[])
+        self.assertEqual(self.post('search',{}).json()['photos'],[])
         self.assertEqual(self.post('star',{'photo':self.p.id}).status_code,404)
     def test_delegated_form_permission(self):
         m=Membership.objects.get(user=self.member);m.permissions={'forms':True};m.save()
@@ -198,12 +201,12 @@ class PermissionWorkflowTests(TestCase):
     def test_other_members_do_not_see_private_requests(self):
         self.post('request',{'photo':self.p.id,'kind':'delete','reason':'敏感理由'});r=Request.objects.get()
         peer=User.objects.create_user('peer',password='test');Membership.objects.create(user=peer,department=self.d,role='member');self.client.force_login(peer)
-        self.assertEqual(self.client.get('/api/state').json()['requests'],[])
+        self.assertEqual(self.post('requests',{'view':'history'}).json()['requests'],[])
         self.assertEqual(self.post('decision',{'id':r.id,'decision':'approve','reason':'x'}).status_code,404)
     def test_cross_department_supervisor_cannot_review(self):
         self.post('request',{'photo':self.p.id,'kind':'delete','reason':'誤傳'});r=Request.objects.get()
         m=Membership.objects.get(user=self.out);m.role='supervisor';m.save();self.client.force_login(self.out)
-        self.assertEqual(self.client.get('/api/state').json()['requests'],[])
+        self.assertEqual(self.post('requests',{'view':'history'}).json()['requests'],[])
         self.assertEqual(self.post('decision',{'id':r.id,'decision':'approve','reason':'x'}).status_code,404)
     def test_stale_and_duplicate_requests(self):
         body={'photo':self.p.id,'kind':'correct','reason':'更正','payload':{'attrs':{'note':'新值'}}}
@@ -213,12 +216,12 @@ class PermissionWorkflowTests(TestCase):
         self.assertEqual(self.post('decision',{'id':r.id,'decision':'reject','reason':'請重新核對版本'}).status_code,200)
     def test_requester_keeps_deletion_result_without_photo_access(self):
         self.post('request',{'photo':self.p.id,'kind':'delete','reason':'誤傳'});r=Request.objects.get();self.client.force_login(self.boss);self.post('decision',{'id':r.id,'decision':'approve','reason':'核准'})
-        self.client.force_login(self.member);s=self.client.get('/api/state').json();self.assertEqual(s['photos'],[]);self.assertEqual(s['requests'][0]['state'],'approved');self.assertFalse(s['requests'][0]['can_open']);self.assertEqual(self.client.get(f'/media/{self.p.id}/preview').status_code,404)
+        self.client.force_login(self.member);self.assertEqual(self.post('search',{}).json()['photos'],[]);reqs=self.post('requests',{'view':'mine'}).json()['requests'];self.assertEqual(reqs[0]['state'],'approved');self.assertFalse(reqs[0]['can_open']);self.assertEqual(self.client.get(f'/media/{self.p.id}/preview').status_code,404)
 
     def test_download_permission_can_be_revoked_separately(self):
         m=Membership.objects.get(user=self.member);m.permissions={'download':False};m.save()
         self.assertEqual(self.client.get(f'/media/{self.p.id}/original').status_code,403)
-        self.assertEqual(len(self.client.get('/api/state').json()['photos']),1)
+        self.assertEqual(len(self.post('search',{}).json()['photos']),1)
     def test_invalid_permission_and_decision_inputs_are_rejected(self):
         admin=User.objects.create_superuser('admin',password='test');self.client.force_login(admin)
         self.assertEqual(self.post('membership',{'user':self.member.id,'department':self.d.id,'role':'member','permissions':{'organize':'false'}}).status_code,400)

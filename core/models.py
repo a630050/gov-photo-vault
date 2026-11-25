@@ -60,6 +60,11 @@ class Photo(models.Model):
                 name='uniq_submitted_burst_cover_per_group',
             )
         ]
+        indexes=[
+            models.Index(fields=['status','-captured','-id'],name='photo_status_cap_idx'),
+            models.Index(fields=['dataset','status'],name='photo_ds_status_idx'),
+            models.Index(fields=['lat','lon'],name='photo_lat_lon_idx'),
+        ]
 class Star(models.Model):
     user=models.ForeignKey(User,on_delete=models.CASCADE)
     photo=models.ForeignKey(Photo,on_delete=models.CASCADE)
@@ -116,8 +121,40 @@ class TagAssertion(models.Model):
     batch=models.CharField(max_length=36)
     actor=models.ForeignKey(User,on_delete=models.PROTECT)
     active=models.BooleanField(default=True)
+class BackgroundJob(models.Model):
+    """Persistent job record managed by the unified background job center."""
+
+    id=models.UUIDField(primary_key=True,default=uuid.uuid4,editable=False)
+    kind=models.CharField(max_length=40,db_index=True)
+    actor=models.ForeignKey(User,on_delete=models.PROTECT)
+    dataset=models.ForeignKey(Dataset,null=True,blank=True,on_delete=models.PROTECT)
+    scope=models.JSONField(default=dict)
+    params=models.JSONField(default=dict)
+    algorithm=models.CharField(max_length=80,blank=True,default='')
+    state=models.CharField(max_length=20,default='pending',db_index=True)
+    total=models.PositiveIntegerField(default=0)
+    completed_count=models.PositiveIntegerField(default=0)
+    failed_count=models.PositiveIntegerField(default=0)
+    cancel_requested=models.BooleanField(default=False)
+    lease_until=models.DateTimeField(null=True,blank=True)
+    worker_id=models.CharField(max_length=80,blank=True,default='')
+    cursor=models.JSONField(default=dict)
+    result_data=models.JSONField(default=dict)
+    error=models.TextField(blank=True,default='')
+    created=models.DateTimeField(auto_now_add=True)
+    started_at=models.DateTimeField(null=True,blank=True)
+    finished_at=models.DateTimeField(null=True,blank=True)
+    updated=models.DateTimeField(auto_now=True)
+
+    class Meta:
+        indexes=[
+            models.Index(fields=['state','lease_until','created'],name='job_claim_idx'),
+            models.Index(fields=['actor','-created'],name='job_actor_created_idx'),
+        ]
+
 class Export(models.Model):
     actor=models.ForeignKey(User,on_delete=models.PROTECT)
+    job=models.ForeignKey(BackgroundJob,null=True,blank=True,on_delete=models.SET_NULL,related_name='exports')
     photo_ids=models.JSONField(default=list)
     file=models.FileField(upload_to='exports')
     created=models.DateTimeField(auto_now_add=True)
@@ -133,6 +170,7 @@ class FormPublication(models.Model):
 class SimilarityRun(models.Model):
     dataset=models.ForeignKey(Dataset,on_delete=models.PROTECT)
     actor=models.ForeignKey(User,on_delete=models.PROTECT)
+    job=models.ForeignKey(BackgroundJob,null=True,blank=True,on_delete=models.SET_NULL,related_name='similarity_runs')
     created=models.DateTimeField(auto_now_add=True)
     updated=models.DateTimeField(auto_now=True)
     state=models.CharField(max_length=20,default='pending')

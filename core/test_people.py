@@ -65,8 +65,8 @@ class PeopleTests(TestCase):
         token=self.candidate();Membership.objects.filter(user=self.member).delete();self.assertEqual(self.confirm(token).status_code,403)
         self.assertEqual(self.confirm('forged').status_code,409)
     def test_photo_serialization_does_not_expose_names_without_grant(self):
-        self.confirm(self.candidate());r=self.client.get('/api/state').json();self.assertEqual(r['photos'][0]['people'][0]['name'],self.person.name)
-        m=Membership.objects.get(user=self.member);m.permissions={};m.save();self.assertEqual(self.client.get('/api/state').json()['photos'][0]['people'],[])
+        self.confirm(self.candidate());r=self.post('search',{}).json();self.assertEqual(r['photos'][0]['people'][0]['name'],self.person.name)
+        m=Membership.objects.get(user=self.member);m.permissions={};m.save();self.assertEqual(self.post('search',{}).json()['photos'][0]['people'],[])
     def test_recycled_moved_or_changed_photos_hidden(self):
         token=self.candidate();self.p.status='recycled';self.p.save();self.assertEqual(self.search().json()['candidates'],[]);self.assertEqual(self.confirm(token).status_code,409)
         self.assertEqual(self.post('people/links',{'person':str(self.person.id)}).json()['links'],[])

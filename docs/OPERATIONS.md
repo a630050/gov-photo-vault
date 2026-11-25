@@ -128,3 +128,21 @@ python verify-operations.py
 整合演練會建立 `.runtime/ops-drill-隨機值/`，使用臨時 loopback 連接埠、新資料庫與程式產生的測試照片，不使用既有帳號或照片。驗證 Waitress、殺掉演練自己的網頁子程序後自動重啟、暫時移開演練自己的照片目錄後 live 200／ready 503／操作 503、不自動建立替代目錄、備份驗證、全新目錄還原及照片內容一致；結束一定要求停止自己的服務，保留備份、還原與 `drill-result.json` 供查核。
 
 本次實測：核心全套 116 項（新增補測後維運共 10 項）、獨立閘道 12 項；整合演練結果見 `.runtime/ops-drill-22f9243eaa/drill-result.json`。Windows 排程 XML 已本機產生並解析，未註冊永久排程，未宣稱已實際重開機或連接真實 NAS。
+
+
+## 統一背景工作行程（`job_worker`）
+
+第二批次起，`ops.py prepare` 預設啟用 `job_worker: true`（既有 profile 亦可於 JSON 加入 `"job_worker": true`），由 `ops.py run` 自動監督啟動 `job_worker`：
+
+```powershell
+# 單次處理目前佇列（開發／排錯）
+python manage.py job_worker --once
+
+# 持續輪詢待處理工作（支援租約逾時接手與 --stop-file 安全停止）
+python manage.py job_worker --watch
+
+# 透過 ops.py 單獨啟動工作行程
+python ops.py worker job_worker --profile .runtime/deployment/profile.json
+```
+
+工作程序每處理一個安全批次（匯出 50 張、近似分析 10 張、行政區重算 50 張、內容索引 5 張）即更新 `lease_until`（60 秒）並檢查 `cancel_requested` 與執行者即時權限。若行程意外終止，新 worker 會在租約到期後自動接手未完成工作，且重試不重複建立 `Export` 或 `SimilarityPair` 紀錄。

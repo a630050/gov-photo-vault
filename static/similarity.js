@@ -5,17 +5,35 @@ function similarityAvailable(){return state.datasets.filter(d=>state.user.capabi
 function renderSimilarity(){
  const s=similarityUI,epoch=++s.epoch;s.busy=false;
  const datasets=similarityAvailable();if(!datasets.some(d=>d.id==s.dataset))s.dataset=datasets[0]?.id||'';
- $('#side').innerHTML=`<h3>資料集近似分析</h3><p class="muted">只有按下執行才分析。不會跨資料集，也不會在上傳後自動執行。</p><label for="sim-dataset">指定資料集</label><select id="sim-dataset">${datasets.map(d=>`<option value="${d.id}" ${d.id==s.dataset?'selected':''}>${esc(dep(item(d.item_id)?.department_id)?.name)}／${esc(d.name)}${d.archived?'（封存）':''}</option>`).join('')}</select><label for="sim-hours">拍攝時間差門檻（小時）</label><input id="sim-hours" type="number" min="0" max="876000" step="any" value="24"><p class="muted">嚴格超過此門檻才標示超時。24 小時即一天；缺時間或未確認時間需人工確認。</p><label class="check"><input id="sim-selected" type="checkbox">僅分析圖台已勾選照片</label><p id="sim-scope" role="status"></p><button id="sim-start" class="primary">手動執行近似分析</button><p class="muted">使用離線 dHash＋aHash 影像指紋，兩種距離皆須 ≤ 6／64。分數是指紋差異，不是造假機率。裁切、翻轉或明顯視角變化可能無法命中。</p>`;
+ $('#side').innerHTML=`<h3>資料集近似分析</h3><p class="muted">只有按下執行才分析。不會跨資料集，也不會在上傳後自動執行。</p><label for="sim-dataset">指定資料集</label><select id="sim-dataset">${datasets.map(d=>`<option value="${d.id}" ${d.id==s.dataset?'selected':''}>${esc(dep(item(d.item_id)?.department_id)?.name)}／${esc(d.name)}${d.archived?'（封存）':''}</option>`).join('')}</select><label for="sim-hours">拍攝時間差門檻（小時）</label><input id="sim-hours" type="number" min="0" max="876000" step="any" value="24"><p class="muted">嚴格超過此門檻才標示超時。24 小時即一天；缺時間或未確認時間需人工確認。</p><label class="check"><input id="sim-selected" type="checkbox">僅分析圖台已勾選照片</label><p id="sim-scope" role="status"></p><button id="sim-start" class="primary">手動執行近似分析</button><button id="sim-queue-job" style="margin-top:8px">排入背景工作中心（可離線完成）</button><p class="muted">使用離線 dHash＋aHash 影像指紋，兩種距離皆須 ≤ 6／64。分數是指紋差異，不是造假機率。裁切、翻轉或明顯視角變化可能無法命中。</p>`;
  $('#main').innerHTML='<div class="toolbar"><h1>近似分析紀錄</h1><button id="sim-reload">重新整理</button></div><div id="sim-message" role="status"></div><div id="sim-history"></div><div id="sim-results"></div>';
- if(!datasets.length){$('#sim-start').disabled=true;$('#sim-message').textContent='尚未取得任何科室的近似分析權限，請由管理者授權。';return}
+ if(!datasets.length){$('#sim-start').disabled=true;$('#sim-queue-job').disabled=true;$('#sim-message').textContent='尚未取得任何科室的近似分析權限，請由管理者授權。';return}
  $('#sim-dataset').onchange=e=>{s.dataset=+e.target.value;s.run=null;s.offset=0;renderSimilarity()};
- $('#sim-selected').onchange=scope;
+ $('#sim-selected').onchange=()=>scope();
  $('#sim-reload').onclick=()=>renderSimilarity();
- function scope(total){const chosen=state.photos.filter(p=>selected.has(p.id)&&p.dataset==s.dataset&&p.status==='submitted');$('#sim-scope').textContent=$('#sim-selected').checked?`本資料集已勾選 ${chosen.length} 張；其他資料集勾選不納入。`:`分析本資料集全部正式照片${typeof total==='number'?'，共 '+total+' 張':''}。本機單次最多 300 張。`;return chosen}
+ function scope(total){
+  const cached=(state.photos||[]).filter(p=>selected.has(p.id)&&p.dataset==s.dataset&&p.status==='submitted');
+  $('#sim-scope').textContent=$('#sim-selected').checked?`已於圖台勾選 ${selected.size} 張（目前已載入快取符合本資料集 ${cached.length} 張；執行時由後端依權限過濾本資料集正式照片）。`:`分析本資料集全部正式照片${typeof total==='number'?'，共 '+total+' 張':''}。單次最多 300 張。`;
+  return cached;
+ }
+ async function resolveSelectedForDataset(){
+  if(!$('#sim-selected').checked)return undefined;
+  const ids=[...selected];if(!ids.length)throw Error('圖台尚未勾選任何照片');
+  const res=await api('search',{datasets:[+s.dataset],status:'submitted',ids:ids.slice(0,300),limit:200});
+  if(!res.ids.length)throw Error('已勾選的照片中沒有屬於此資料集的正式照片');
+  return res.ids;
+ }
  $('#sim-start').onclick=()=>action(async()=>{
   if(s.busy)return;const hours=Number($('#sim-hours').value);if(!$('#sim-hours').value||!Number.isFinite(hours)||hours<0||hours>876000)return toast('請填寫有效的小時門檻');
-  const chosen=scope();s.busy=true;$('#sim-start').disabled=true;
-  try{const r=await api('similarity/start',{dataset:+s.dataset,hours,...($('#sim-selected').checked?{photos:chosen.map(p=>p.id)}:{})});s.run=r.id;s.offset=0;await work(r.id)}finally{if(epoch===s.epoch&&tab==='similarity'){s.busy=false;$('#sim-start').disabled=false}}
+  s.busy=true;$('#sim-start').disabled=true;
+  try{const chosenIds=await resolveSelectedForDataset();const r=await api('similarity/start',{dataset:+s.dataset,hours,...(chosenIds?{photos:chosenIds}:{})});s.run=r.id;s.offset=0;await work(r.id)}finally{if(epoch===s.epoch&&tab==='similarity'){s.busy=false;$('#sim-start').disabled=false}}
+ });
+ $('#sim-queue-job').onclick=()=>action(async()=>{
+  const hours=Number($('#sim-hours').value);if(!$('#sim-hours').value||!Number.isFinite(hours)||hours<0||hours>876000)return toast('請填寫有效的小時門檻');
+  const chosenIds=await resolveSelectedForDataset();
+  const r=await api('jobs/create',{kind:'similarity',dataset:+s.dataset,hours,...(chosenIds?{photos:chosenIds}:{})});
+  toast(`已排入背景工作中心（工作 ${r.job.id.slice(0,8)}），關閉瀏覽器仍會繼續分析`);
+  await history();
  });
  async function history(){
   const result=await api('similarity/list',{dataset:+s.dataset});if(epoch!==s.epoch||tab!=='similarity')return;

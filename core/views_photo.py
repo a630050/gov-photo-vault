@@ -25,6 +25,31 @@ from .image_metadata import extract_metadata
 from .burst import assign_burst_group, compute_dhash_from_image, reconcile_burst_scope
 from .models import Anomaly, Dataset, Membership, Notice, Photo, Request, RequestEvent, Star, TagAssertion
 from .permissions import allowed
+from .search import resolve_selection_ids
+
+
+def _resolve_batch_photos(u, data, *, max_count=500, require_editable=False):
+    if data.get('selection_token'):
+        ids = resolve_selection_ids(visible(u), u, data['selection_token'], data.get('excluded_photos'))
+        if not ids:
+            raise Problem('目前條件下沒有可處理的照片', 409)
+        if len(ids) > max_count:
+            raise Problem(f'跨頁批次操作單次上限 {max_count} 張，目前選取 {len(ids)} 張，請縮小搜尋範圍', 422)
+        photos = list(visible(u).select_for_update().filter(id__in=ids) if require_editable else visible(u).filter(id__in=ids))
+        if len(photos) != len(ids):
+            raise Problem('照片權限或狀態已變動', 409)
+    else:
+        ids = data.get('photos', [])
+        if not isinstance(ids, list) or not 1 <= len(ids) <= max_count or any(type(i) is not int for i in ids):
+            raise Problem(f'請選擇 1 至 {max_count} 張照片', 422)
+        unique_ids = set(ids)
+        photos = list(visible(u).select_for_update().filter(id__in=unique_ids) if require_editable else visible(u).filter(id__in=unique_ids))
+        if len(photos) != len(unique_ids):
+            raise Problem('照片權限或狀態已變動', 409)
+    if require_editable:
+        for p in photos:
+            editable(u, p)
+    return photos
 
 
 def _apply_tags(p, tags, batch, u):
@@ -113,33 +138,20 @@ def handle_photo_api(request, path, data, u):
         return JsonResponse({'results': results})
 
     if path == 'batch_star':
-        ids = data.get('photos', [])
-        if not isinstance(ids, list) or not 1 <= len(ids) <= 500 or any(type(i) is not int for i in ids):
-            raise Problem('請選擇 1 至 500 張照片', 422)
-        photos = list(visible(u).filter(id__in=set(ids)))
-        if len(photos) != len(set(ids)):
-            raise Problem('照片權限或狀態已變動', 409)
+        photos = _resolve_batch_photos(u, data, max_count=500, require_editable=False)
         existing = set(Star.objects.filter(user=u, photo__in=photos).values_list('photo_id', flat=True))
         to_create = [Star(user=u, photo=p) for p in photos if p.id not in existing]
         Star.objects.bulk_create(to_create)
         for p in photos:
             if p.id not in existing:
                 audit(u, 'star', p.id)
-        return JsonResponse({'ok': True, 'count': len(to_create)})
+        return JsonResponse({'ok': True, 'count': len(to_create), 'matched': len(photos)})
 
     if path == 'batch_tags':
-        ids = data.get('photos', [])
         tags = [str(t).strip()[:60] for t in data.get('tags', []) if str(t).strip()]
-        if not isinstance(ids, list) or not 1 <= len(ids) <= 500 or any(type(i) is not int for i in ids):
-            raise Problem('請選擇 1 至 500 張照片', 422)
         if not tags:
             raise Problem('請輸入至少一個標籤', 422)
-        unique_ids = set(ids)
-        photos = list(visible(u).select_for_update().filter(id__in=unique_ids))
-        if len(photos) != len(unique_ids):
-            raise Problem('照片權限或狀態已變動', 409)
-        for p in photos:
-            editable(u, p)
+        photos = _resolve_batch_photos(u, data, max_count=500, require_editable=True)
         batch = data.get('batch') or str(uuid.uuid4())
         for p in photos:
             _apply_tags(p, tags, batch, u)

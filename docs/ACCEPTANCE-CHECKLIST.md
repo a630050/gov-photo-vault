@@ -133,3 +133,17 @@
   * [x] 資料庫唯一約束 `uniq_submitted_burst_cover_per_group` 與交易鎖防護併發多首圖，合併衝突與首圖遺失依固定規則裁決並留存稽核。
   * [x] 堆疊卡片顯示「符合 M / 共 N 張」，區分「選取這張」、「選取整組」與「選取目前結果」，條件變更清除選取，批次操作前確認實際張數。
 * **正式環境驗收狀態**：尚未進行正式環境（PostgreSQL/PostGIS + 正式內網 SMB + 萬筆負載）驗收，將於第二、三批次完成後一併整合驗收。
+
+
+## 擴充規格書第二批次交付紀錄（大量資料瀏覽與統一背景工作中心）
+
+* **資料遷移**：`core/migrations/0014_backgroundjob_photo_photo_status_cap_idx_and_more.py`（新增 `BackgroundJob` 與 `Photo`/`BackgroundJob` 查詢索引，為 `Export` 與 `SimilarityRun` 補上可空 `job` 外鍵，完整保留既有紀錄與人工檢閱歷史）。
+* **程式已實作與本機已驗證**：
+  * [x] `GET /api/state` 精簡載入（10,500 張庫存實測 **1,367 bytes**），前端登入後按分頁取得照片、案件（`POST /api/requests`）與通知（`POST /api/notices`），篩選選項由 `POST /api/filter_options` 依權限提供。
+  * [x] `POST /api/search` 後端分頁（預設 100、上限 200）與固定排序，完整結果統計與分組命中數於整批符合集計算。
+  * [x] 圖牆虛擬捲動維持可視區 28 張 `.photo` DOM 節點（10,000 張基準下總 DOM 492–493 個、JS Heap 4.81–5.40 MB），支援圖片延遲載入與錯誤重試，以及縮放大小錨點保持。
+  * [x] `POST /api/map_clusters` 後端網格群聚與點擊群聚後分頁清單數字一致，並先套用即時權限。
+  * [x] 跨頁選取憑證（`selection_token` ＋ `excluded_photos`）套用於批量打星、批量標籤與背景大量匯出，後端重驗即時權限、狀態與張數上限；異常／撤權／過期即時拒絕或失敗。
+  * [x] 統一背景工作中心（`core/jobs.py`、`job_worker`、工作中心頁面）納管大量匯出、手動單資料集近似分析、行政區批次重算與內容索引維護；本機測試驗證租約逾時接手、重試不重複 `SimilarityPair`、批次邊界取消、行政區座標併發寫入防護及下載重驗權限。
+* **正式環境驗收狀態（尚未完成）**：
+  * [ ] 正式環境 PostgreSQL/PostGIS、多台並行壓力測試（N02 100 人混合負載 p95 ≤ 3 秒）與真實內網 SMB 吞吐實測。

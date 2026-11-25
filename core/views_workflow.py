@@ -223,18 +223,22 @@ def download_export(request, id):
     e = Export.objects.filter(id=id, actor=request.user).first()
     if not e:
         return JsonResponse({'error': '沒有權限'}, status=403)
-    if any(
-        not allowed(request.user, p.dataset.item.department_id, 'export')
-        or not allowed(request.user, p.dataset.item.department_id, 'download')
-        for p in Photo.objects.filter(id__in=e.photo_ids).select_related('dataset__item')
-    ):
-        return JsonResponse({'error': '匯出或下載權限已撤銷'}, status=403)
     if timezone.now() - e.created > timedelta(days=7):
         if e.file:
             e.file.delete(save=False)
         e.delete()
         return JsonResponse({'error': '下載包已到期'}, status=410)
-    if visible(request.user).filter(id__in=e.photo_ids, status='submitted').count() != len(e.photo_ids):
+    total_visible = 0
+    for start in range(0, len(e.photo_ids), 500):
+        chunk = e.photo_ids[start : start + 500]
+        if any(
+            not allowed(request.user, p.dataset.item.department_id, 'export')
+            or not allowed(request.user, p.dataset.item.department_id, 'download')
+            for p in Photo.objects.filter(id__in=chunk).select_related('dataset__item')
+        ):
+            return JsonResponse({'error': '匯出或下載權限已撤銷'}, status=403)
+        total_visible += visible(request.user).filter(id__in=chunk, status='submitted').count()
+    if total_visible != len(e.photo_ids):
         return JsonResponse({'error': '照片已變動，請重新匯出'}, status=409)
     audit(request.user, 'export_download', e.id)
     response = FileResponse(e.file.open('rb'), as_attachment=True, filename=f'photos-{e.id}.zip')

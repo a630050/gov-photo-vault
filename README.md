@@ -227,3 +227,30 @@ python verify-operations.py
 * **已知限制與正式環境待驗收項目**：
   * 目前為 SQLite 本機單機實作；萬筆資料後端分頁、圖牆虛擬捲動、後端地理群聚與統一背景工作中心將於**第二批次**交付。
   * 行政區版本管理、儲存常用搜尋、人工工作集合與檔案對帳將於**第三批次**交付。
+
+
+## 大量資料瀏覽、地圖群聚與統一背景工作中心（第二批次交付）
+
+### 程式已實作項目
+* **精簡初始載入與分頁入口**：`GET /api/state` 不再回傳全量 `photos`、`requests` 與 `notices` 陣列，改回傳登入者權限、科室／資料集／表單基本資料、摘要計數（`summary`）、授權篩選選項（`filter_options`）及各分頁入口（`endpoints`）。新增 `POST /api/requests`、`POST /api/notices`、`POST /api/filter_options` 與 `POST /api/photo_detail`。
+* **後端搜尋分頁與統計一致性**：`POST /api/search` 改為後端分頁（預設每頁 100 張、上限 200 張），固定以 `(captured DESC NULLS LAST, -id)` 排序；`total`、`located`、`missing_location`、`region_stats` 與 `burst_matched_counts` 皆代表完整授權搜尋結果。
+* **後端地理群聚**：`POST /api/map_clusters` 依目前視窗 `bounds`、`zoom`、搜尋條件與權限於後端計算 Web Mercator 格網聚合（`mercator_bin`）；點擊群聚時以相同群聚條件向後端分頁讀取，確保群聚數字與清單完全一致。
+* **圖牆虛擬捲動與跨頁全選**：前端圖牆／清單僅渲染可視區域與緩衝卡片，延遲載入縮圖並支援載入中／失敗重試狀態，縮放縮圖大小後自動校正捲動錨點。支援「選取全部符合條件的結果」（HMAC 簽章 `selection_token` ＋ `excluded_photos`），於執行批量打星、批量標籤或匯出前重新驗證即時權限、照片狀態與上限。
+* **統一背景工作中心與獨立 worker**：新增 `BackgroundJob` 資料表（遷移 `0014`）、`core/jobs.py`、`core/views_jobs.py`、`static/jobs.js` 與 `python manage.py job_worker`（支援 `--watch`／`--once`／`ops.py worker job_worker`），納管**大量照片匯出**（最高 5,000 張串流 ZIP）、**手動單資料集近似分析**（保留既有 `SimilarityRun`/`SimilarityPair` 與檢閱歷史）、**行政區批次重算**（含座標樂觀防護避免舊結果覆蓋新座標）與**離線內容／OCR 索引維護**；具備租約逾時接手、批次邊界取消、重試冪等、並行上限（`MAX_CONCURRENT_JOBS=2`，重型模型／分析互斥）及執行與下載即時驗權。
+
+### 本機實測基準（>= 10,000 張照片）
+可由 `python scripts/benchmark_10k.py`（10,500 筆 SQLite 資料）與 `python scripts/benchmark_browser.py`（Chrome DevTools 協議，10,000 張圖牆模擬）重現，下列為實際量測數據：
+
+| 指標 | 實測結果 |
+|---|---|
+| `GET /api/state` 封包大小（10,500 張庫存） | **1,367 bytes**（不含全量照片陣列） |
+| `POST /api/search` 第 1 頁（100 張）延遲／封包 | **122.56 ms** ／ 79,646 bytes |
+| `POST /api/search` 第 51 頁（offset 5000）延遲 | **87.35 ms** |
+| `POST /api/search` 標籤篩選（3,500 筆命中）延遲 | **118.98 ms** |
+| `POST /api/map_clusters`（10,500 筆座標聚合）延遲 | **120.79 ms** |
+| Chrome 10,000 張虛擬捲動 DOM `.photo` 節點數（頂部／中段） | **28 張**（總 DOM 節點 492–493 個） |
+| Chrome 10,000 張虛擬捲動 JS Heap（`usedJSHeapSize`） | **4.81–5.40 MB** |
+
+### 尚未納入與正式環境待驗收項目
+* 本批次採單機 SQLite ＋ 獨立 `job_worker` 行程，未導入外部訊息佇列服務（如 Redis/Celery），高並發多人混用（N02）與 PostgreSQL/PostGIS 部署仍待正式環境驗收。
+* 行政區邊界版本管理、儲存常用搜尋、人工工作集合與檔案對帳將於**第三批次**交付。

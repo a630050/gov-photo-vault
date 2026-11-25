@@ -36,7 +36,7 @@ def prepare(args):
     base.mkdir(parents=True,exist_ok=True);media.mkdir(parents=True,exist_ok=True)
     storage_id=str(uuid.uuid4());(media/'.photo-storage-id').write_text(storage_id,encoding='ascii')
     (base/'secret.txt').write_text(secrets.token_urlsafe(64),encoding='ascii')
-    data={'version':1,'component':args.component,'database':str(base/'data.sqlite3'),'media':str(media),'run':str(base/'run'),'backups':str(base/'backups'),'secret_file':str(base/'secret.txt'),'storage_id':storage_id,'port':args.port,'min_free_mb':512,'backup_hours':24,'semantic_worker':False,'bridge_worker':False,'allowed_hosts':['localhost','127.0.0.1']}
+    data={'version':1,'component':args.component,'database':str(base/'data.sqlite3'),'media':str(media),'run':str(base/'run'),'backups':str(base/'backups'),'secret_file':str(base/'secret.txt'),'storage_id':storage_id,'port':args.port,'min_free_mb':512,'backup_hours':24,'semantic_worker':False,'bridge_worker':False,'job_worker':True,'allowed_hosts':['localhost','127.0.0.1']}
     if args.gateway_config:data['gateway_config']=str(Path(args.gateway_config).resolve())
     atomic_json(path,data)
     print('Prepared profile:',path)
@@ -77,6 +77,7 @@ def run(p):
     if p['component']=='core':
         if p.get('semantic_worker'):services['semantic']=['worker','semantic_index']
         if p.get('bridge_worker'):services['bridge']=['worker','external_bridge']
+        if p.get('job_worker', True):services['jobs']=['worker','job_worker']
     started=time.time();logger.info('Supervisor started')
     try:
         while not stop.exists():
@@ -139,7 +140,7 @@ def main():
     prep=sub.add_parser('prepare');prep.add_argument('--profile',required=True);prep.add_argument('--directory',required=True);prep.add_argument('--media');prep.add_argument('--port',type=int,default=8010);prep.add_argument('--component',choices=['core','gateway'],default='core');prep.add_argument('--gateway-config')
     for name in ('migrate','run','web','status','stop','backup','worker'):
         cmd=sub.add_parser(name)
-        if name=='worker':cmd.add_argument('worker',choices=['semantic_index','external_bridge'])
+        if name=='worker':cmd.add_argument('worker',choices=['semantic_index','external_bridge','job_worker'])
         cmd.add_argument('--profile',required=True)
     for name in ('verify','restore'):
         cmd=sub.add_parser(name);cmd.add_argument('--archive',required=True)
