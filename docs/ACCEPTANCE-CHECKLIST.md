@@ -147,3 +147,15 @@
   * [x] 統一背景工作中心（`core/jobs.py`、`job_worker`、工作中心頁面）納管大量匯出、手動單資料集近似分析、行政區批次重算與內容索引維護；本機測試驗證租約逾時接手、重試不重複 `SimilarityPair`、批次邊界取消、行政區座標併發寫入防護及下載重驗權限。
 * **正式環境驗收狀態（尚未完成）**：
   * [ ] 正式環境 PostgreSQL/PostGIS、多台並行壓力測試（N02 100 人混合負載 p95 ≤ 3 秒）與真實內網 SMB 吞吐實測。
+
+
+## 擴充規格書第三批次交付紀錄（整理與維運擴充）
+
+* **資料遷移**：`core/migrations/0015_photo_admin_error_photo_admin_status_and_more.py`（新增 `AdminBoundaryVersion`、`SavedSearch`、`WorkCollection`、`WorkCollectionItem`、`StorageReconcileReport` 與 `Photo` 反查狀態欄位，並無損回填既有照片反查狀態與預設邊界版本）。
+* **程式已實作與本機已驗證**：
+  * [x] 行政區資料來源、版本、SHA-256 校驗碼與啟用時間完整記錄；照片區分 `ok`、`no_coords`、`out_of_bounds`、`not_found`、`boundary_unavailable`、`failed` 六種反查狀態，離島、孔洞多邊形與邊界驗證通過且重算不改寫原始 EXIF／表單／新座標。
+  * [x] 儲存常用搜尋以當下資料及權限執行；資料集或自訂欄位失效／失權時拒絕執行並提示原因，不默默放寬範圍。
+  * [x] 個人／科室共享人工工作集合僅存關聯、不搬移原圖；失權或回收立即不可見，集合內批次操作即時重驗權限並保存異動稽核。
+  * [x] 檔案對帳預設不刪除檔案，正確排除寬限期內檔案，並可獨立修復缺漏縮圖及查看各科室／資料集容量統計。
+* **正式環境驗收狀態（尚未完成）**：
+  * [ ] 正式環境 PostgreSQL／PostGIS 空間索引與實際內網圖資／NAS 儲存大規模對帳效能仍待正式環境另行驗收。

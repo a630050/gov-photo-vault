@@ -1,5 +1,5 @@
 const jobsUI={kind:'',state:'',offset:0,limit:20,rows:[],total:0,hasNext:false,epoch:0,pollTimer:null};
-const jobKindLabels={export:'大量照片匯出',similarity:'資料集近似分析',region_recompute:'行政區批次重算',semantic_index:'內容索引維護'};
+const jobKindLabels={export:'大量照片匯出',similarity:'資料集近似分析',region_recompute:'行政區批次重算',semantic_index:'內容索引維護',reconcile:'檔案對帳掃描'};
 const jobStateLabels={pending:'等待中',running:'執行中',completed:'已完成',partial_failed:'部分失敗',failed:'失敗',cancelled:'已取消'};
 function resetJobs(){clearTimeout(jobsUI.pollTimer);jobsUI.pollTimer=null;jobsUI.epoch++;jobsUI.rows=[];jobsUI.offset=0;jobsUI.total=0;jobsUI.hasNext=false;jobsUI.kind='';jobsUI.state=''}
 function renderJobs(){

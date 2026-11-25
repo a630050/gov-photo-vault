@@ -52,6 +52,10 @@ class Photo(models.Model):
     admin_county=models.CharField(max_length=20,blank=True,default='',db_index=True)
     admin_town=models.CharField(max_length=20,blank=True,default='',db_index=True)
     admin_village=models.CharField(max_length=30,blank=True,default='')
+    admin_status=models.CharField(max_length=24,blank=True,default='',db_index=True)
+    admin_version=models.CharField(max_length=60,blank=True,default='')
+    admin_updated_at=models.DateTimeField(null=True,blank=True)
+    admin_error=models.CharField(max_length=200,blank=True,default='')
     class Meta:
         constraints=[
             models.UniqueConstraint(
@@ -303,3 +307,66 @@ class PhotoOcr(models.Model):
 
     class Meta:
         unique_together = [('photo', 'model_key')]
+
+
+class AdminBoundaryVersion(models.Model):
+    """Metadata and checksum for offline administrative boundary datasets."""
+
+    version = models.CharField(max_length=60, unique=True)
+    source = models.CharField(max_length=250)
+    published_date = models.CharField(max_length=40, blank=True, default='')
+    sha256 = models.CharField(max_length=64)
+    crs = models.CharField(max_length=40, default='EPSG:4326 (WGS84)')
+    file_path = models.CharField(max_length=300, blank=True, default='')
+    active = models.BooleanField(default=True, db_index=True)
+    activated_at = models.DateTimeField(default=timezone.now)
+    imported_by = models.ForeignKey(User, null=True, blank=True, on_delete=models.PROTECT)
+    created = models.DateTimeField(auto_now_add=True)
+
+
+class SavedSearch(models.Model):
+    """User-saved search criteria (evaluated live against current data and permissions)."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    owner = models.ForeignKey(User, on_delete=models.CASCADE, related_name='saved_searches')
+    name = models.CharField(max_length=100)
+    criteria = models.JSONField(default=dict)
+    display_mode = models.CharField(max_length=16, default='map')
+    created = models.DateTimeField(auto_now_add=True)
+    updated = models.DateTimeField(auto_now=True)
+
+
+class WorkCollection(models.Model):
+    """Named curated collection of photo links (personal or department-shared)."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    name = models.CharField(max_length=120)
+    description = models.TextField(blank=True, default='')
+    owner = models.ForeignKey(User, on_delete=models.PROTECT, related_name='owned_collections')
+    department = models.ForeignKey(Department, null=True, blank=True, on_delete=models.PROTECT)
+    shared = models.BooleanField(default=False)
+    created = models.DateTimeField(auto_now_add=True)
+    updated = models.DateTimeField(auto_now=True)
+
+
+class WorkCollectionItem(models.Model):
+    collection = models.ForeignKey(WorkCollection, on_delete=models.CASCADE, related_name='items')
+    photo = models.ForeignKey(Photo, on_delete=models.CASCADE, related_name='collection_items')
+    added_by = models.ForeignKey(User, on_delete=models.PROTECT)
+    added_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = [('collection', 'photo')]
+
+
+class StorageReconcileReport(models.Model):
+    """Non-destructive file reconciliation & capacity snapshot report."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    actor = models.ForeignKey(User, null=True, blank=True, on_delete=models.PROTECT)
+    job = models.ForeignKey(BackgroundJob, null=True, blank=True, on_delete=models.SET_NULL)
+    mode = models.CharField(max_length=30, default='report')
+    grace_hours = models.PositiveIntegerField(default=24)
+    summary = models.JSONField(default=dict)
+    issues = models.JSONField(default=list)
+    created = models.DateTimeField(auto_now_add=True)

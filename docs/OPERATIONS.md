@@ -146,3 +146,9 @@ python ops.py worker job_worker --profile .runtime/deployment/profile.json
 ```
 
 工作程序每處理一個安全批次（匯出 50 張、近似分析 10 張、行政區重算 50 張、內容索引 5 張）即更新 `lease_until`（60 秒）並檢查 `cancel_requested` 與執行者即時權限。若行程意外終止，新 worker 會在租約到期後自動接手未完成工作，且重試不重複建立 `Export` 或 `SimilarityPair` 紀錄。
+
+
+## 行政區邊界管理與檔案對帳維運
+
+- **行政區邊界版本**：系統管理者可於「管理後台 → 部署與維運」查看目前啟用的 `AdminBoundaryVersion` 校驗碼與來源授權，透過 `POST /api/boundary/save` 註冊新版本並依需要啟用，或排程 `region_recompute` 背景工作依指定版本重算行政區（重算期間若照片座標被更正，舊工作結果不會覆寫新座標）。
+- **檔案對帳與容量**：`reconcile/run`（或工作中心 `kind='reconcile'`）預設為**只產報告、不刪除任何檔案**的唯讀對帳，並套用寬限期排除進行中上傳／暫存與執行中背景工作。縮圖修復（`reconcile/repair_previews`）只重算缺漏縮圖，不變動原圖與孤立檔；孤立檔清理須透過 `reconcile/confirm_orphan_cleanup` 由管理者填寫理由並二次核對資料庫引用與寬限期後執行。

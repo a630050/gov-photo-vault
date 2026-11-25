@@ -110,3 +110,8 @@
 .button-link{display:inline-block;padding:9px 14px;border-radius:8px;background:#135c58;color:white;text-decoration:none;font-size:13px}
 .button-link:hover{background:#0f4946}
 #cards{position:relative}
+.saved-search-list{display:flex;flex-direction:column;gap:6px;margin-top:6px}
+.saved-search-row{display:flex;gap:4px;align-items:center}
+.saved-search-btn{flex:1;text-align:left;padding:6px 9px;font-size:12px}
+.saved-search-btn.is-invalid{border-color:#d4ab63;background:#fff5df;color:#7a4e15}
+.saved-del-btn{padding:6px 8px;font-size:11px;color:#8a99a8}

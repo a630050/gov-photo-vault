@@ -2,13 +2,14 @@ import math
 import re
 from datetime import datetime
 from zoneinfo import ZoneInfo
+from django.conf import settings
 from django.db.models import Count, Q
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
-from .models import Audit, Anomaly, Membership, PersonPhotoLink, Request, Revision, Star, Photo
+from .models import AdminBoundaryVersion, Audit, Anomaly, Membership, PersonPhotoLink, Request, Revision, Star, Photo
 from .permissions import allowed, capabilities_data
 from .face_engine import MODEL_KEY as FACE_MODEL_KEY
-from .geocoding import reverse_geocode
+from .geocoding import DATA_PATH, DEFAULT_VERSION, geocode_with_status
 
 
 class Problem(Exception):
@@ -229,6 +230,10 @@ def serialize_photos(photos, u):
             county=p.admin_county,
             town=p.admin_town,
             village=p.admin_village,
+            admin_status=p.admin_status,
+            admin_version=p.admin_version,
+            admin_updated_at=p.admin_updated_at.isoformat() if p.admin_updated_at else '',
+            admin_error=p.admin_error,
             star=p.id in starred_ids,
             uploader=p.uploader.username,
             preview=f'/media/{p.id}/preview',
@@ -244,11 +249,35 @@ def serialize(p, u):
     return serialize_photos([p], u)[0]
 
 
-def update_photo_admin_region(p):
-    county, town, village = reverse_geocode(p.lat, p.lon)
-    p.admin_county = county
-    p.admin_town = town
-    p.admin_village = village
+def active_boundary_spec(version_label=None):
+    q = AdminBoundaryVersion.objects
+    bv = q.filter(version=version_label).first() if version_label else q.filter(active=True).order_by('-activated_at', '-id').first()
+    if not bv:
+        if version_label:
+            return {'version': version_label, 'path': '__missing__', 'sha256': ''}
+        return {'version': DEFAULT_VERSION, 'path': str(DATA_PATH), 'sha256': ''}
+    p = bv.file_path or ''
+    resolved = str((settings.BASE_DIR / p).resolve()) if p and not p.startswith(('\\', '/')) and ':' not in p else p
+    return {'version': bv.version, 'path': resolved, 'sha256': bv.sha256}
+
+
+def update_photo_admin_region(p, *, version_label=None):
+    spec = active_boundary_spec(version_label)
+    res = geocode_with_status(
+        p.lat,
+        p.lon,
+        boundary_path=spec['path'],
+        version_label=spec['version'],
+        expected_sha256=spec['sha256'] or None,
+    )
+    p.admin_county = res['county']
+    p.admin_town = res['town']
+    p.admin_village = res['village']
+    p.admin_status = res['status']
+    p.admin_version = res['version']
+    p.admin_updated_at = timezone.now()
+    p.admin_error = res['error'][:200]
+    return res
 
 
 FIELD_TYPES = {'text', 'textarea', 'integer', 'number', 'date', 'select', 'multi', 'boolean'}

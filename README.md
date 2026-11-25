@@ -254,3 +254,16 @@ python verify-operations.py
 ### 尚未納入與正式環境待驗收項目
 * 本批次採單機 SQLite ＋ 獨立 `job_worker` 行程，未導入外部訊息佇列服務（如 Redis/Celery），高並發多人混用（N02）與 PostgreSQL/PostGIS 部署仍待正式環境驗收。
 * 行政區邊界版本管理、儲存常用搜尋、人工工作集合與檔案對帳將於**第三批次**交付。
+
+
+## 整理與維運擴充（第三批次交付）
+
+### 程式已實作項目
+* **行政區邊界資料版本管理與反查狀態追蹤**：
+  * 新增 `AdminBoundaryVersion` 資料表（遷移 `0015`）記錄邊界資料來源與授權、版本／發布日期、檔案 SHA-256 校驗碼、座標系統（`EPSG:4326 (WGS84)`）與啟用時間，並無損回填既有照片反查狀態與預設版本 `tw-village-2026-default`。
+  * [geocoding.py](file:///d:/%E7%85%A7%E7%89%87%E7%AE%A1%E7%90%86%E7%B3%BB%E7%B5%B1/core/geocoding.py) 支援 TopoJSON 與 GeoJSON，明確區分並保存照片 `admin_status`（`ok`、`no_coords`、`out_of_bounds`、`not_found`、`boundary_unavailable`、`failed`）、`admin_version`、`admin_updated_at` 與 `admin_error`，支援離島多邊形（`MultiPolygon`）、內環孔洞排除及邊界線命中判定；可於後台「部署與維運」管理邊界版本或透過工作中心依指定版本／僅失敗項目批次重算（不改寫原始 EXIF、座標或表單）。
+* **儲存常用搜尋與人工工作集合**：
+  * [views_collections.py](file:///d:/%E7%85%A7%E7%89%87%E7%AE%A1%E7%90%86%E7%B3%BB%E7%B5%B1/core/views_collections.py) 與 [collections.js](file:///d:/%E7%85%A7%E7%89%87%E7%AE%A1%E7%90%86%E7%B3%BB%E7%B5%B1/static/collections.js) 提供常用搜尋條件命名儲存與即時驗證，失效或失權的資料集與自訂欄位會顯示明確警告，絕不默默放寬為全部搜尋。
+  * 「工作集合」支援個人集合與科室共享集合（需該科整理權限），僅保存照片關聯、不複製或搬移原圖；任何讀取與集合內批次操作皆即時套用 `visible` 與回收區過濾，並記錄管理與共享異動稽核。
+* **檔案對帳與容量統計**：
+  * [reconcile.py](file:///d:/%E7%85%A7%E7%89%87%E7%AE%A1%E7%90%86%E7%B3%BB%E7%B5%B1/core/reconcile.py) 與 [views_reconcile.py](file:///d:/%E7%85%A7%E7%89%87%E7%AE%A1%E7%90%86%E7%B3%BB%E7%B5%B1/core/views_reconcile.py)（限系統管理者）提供非破壞性對帳掃描（`missing_original`、`missing_preview`、`orphan_file`、`hash_mismatch`、`semantic_gap`、`ocr_gap`、`face_gap`、`external_stale`）、寬限期保護（預設 24 小時，排除進行中檔案）、獨立縮圖修復與人工確認清理孤立檔，並於「管理後台 → 部署與維運」呈現各科室／資料集容量、衍生檔空間、剩餘空間與未處理異常統計。

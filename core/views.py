@@ -115,6 +115,12 @@ def api(request, path):
         if path.startswith('jobs/') and method == 'POST':
             from .views_jobs import handle_jobs_api
             return handle_jobs_api(path, data, u)
+        if path.startswith(('saved_searches/', 'collections/')) and method == 'POST':
+            from .views_collections import handle_collections_api
+            return handle_collections_api(path, data, u)
+        if path.startswith('reconcile/') and method == 'POST':
+            from .views_reconcile import handle_reconcile_api
+            return handle_reconcile_api(path, data, u)
         if path == 'nearby' and method == 'POST':
             try:
                 with transaction.atomic():

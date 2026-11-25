@@ -302,14 +302,14 @@ class Batch2Tests(TestCase):
         self.assertEqual(res.status_code, 200)
         job_id = res.json()['job']['id']
 
-        # Simulate coordinates changing concurrently right as reverse_geocode computes the old coordinate
-        from .geocoding import reverse_geocode as real_rg
-        def mutating_rg(lat, lon):
-            result = real_rg(lat, lon)
+        # Simulate coordinates changing concurrently right as geocode_with_status computes the old coordinate
+        from .geocoding import geocode_with_status as real_geocode
+        def mutating_geocode(lat, lon, **kwargs):
+            result = real_geocode(lat, lon, **kwargs)
             Photo.objects.filter(id=p.id).update(lat=22.6273, lon=120.3014, admin_county='高雄市', admin_town='前金區', admin_village='')
             return result
 
-        with patch('core.jobs.reverse_geocode', side_effect=mutating_rg):
+        with patch('core.jobs.geocode_with_status', side_effect=mutating_geocode):
             process_one_job(worker_id='geo-worker')
 
         p.refresh_from_db()

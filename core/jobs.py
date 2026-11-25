@@ -14,9 +14,9 @@ from django.core.files import File
 from django.db import IntegrityError, transaction
 from django.db.models import F, Q
 from django.utils import timezone
-from .geocoding import reverse_geocode
-from .helpers import Problem, audit, manager, visible
-from .models import BackgroundJob, Dataset, Export, Photo, PhotoEmbedding, PhotoOcr, SimilarityPair, SimilarityRun
+from .geocoding import geocode_with_status
+from .helpers import Problem, active_boundary_spec, audit, manager, visible
+from .models import AdminBoundaryVersion, BackgroundJob, Dataset, Export, Photo, PhotoEmbedding, PhotoOcr, SimilarityPair, SimilarityRun, StorageReconcileReport
 from .ocr import MODEL_KEY as OCR_MODEL_KEY, index_ocr_batch
 from .ocr_engine import ModelUnavailable as OcrUnavailable, readiness as ocr_readiness
 from .permissions import allowed
@@ -76,7 +76,7 @@ def _job_scope_queryset(user):
 
 
 def create_job(user, kind, data):
-    if kind not in ('export', 'similarity', 'region_recompute', 'semantic_index'):
+    if kind not in ('export', 'similarity', 'region_recompute', 'semantic_index', 'reconcile'):
         raise Problem('未知的工作類型', 422)
 
     if kind == 'export':
@@ -180,10 +180,15 @@ def create_job(user, kind, data):
             if not user.is_superuser:
                 raise Problem('僅系統管理者可執行全系統行政區重算', 403)
             q = Photo.objects.all()
+        boundary_version = str(data.get('boundary_version') or '').strip()
+        if boundary_version and not AdminBoundaryVersion.objects.filter(version=boundary_version).exists():
+            raise Problem('找不到指定的行政區邊界版本', 404)
+        spec = active_boundary_spec(boundary_version or None)
         only_failed = bool(data.get('only_failed'))
-        q = q.filter(lat__isnull=False, lon__isnull=False)
         if only_failed:
-            q = q.filter(admin_county='')
+            q = q.filter(lat__isnull=False, lon__isnull=False).exclude(admin_status='ok')
+        else:
+            q = q.filter(lat__isnull=False, lon__isnull=False)
         total = q.count()
         if total == 0:
             raise Problem('此範圍目前沒有需要重算行政區的照片', 422)
@@ -192,11 +197,11 @@ def create_job(user, kind, data):
             actor=user,
             dataset=ds,
             scope={'dataset': ds.id if ds else None},
-            params={'only_failed': only_failed},
-            algorithm='taiwan-village-topo-v1',
+            params={'only_failed': only_failed, 'boundary_version': spec['version']},
+            algorithm=spec['version'],
             total=total,
         )
-        audit(user, 'job_create', job.id, {'kind': 'region_recompute', 'dataset': ds.id if ds else None, 'total': total})
+        audit(user, 'job_create', job.id, {'kind': 'region_recompute', 'dataset': ds.id if ds else None, 'total': total, 'boundary_version': spec['version']})
         return job
 
     if kind == 'semantic_index':
@@ -225,6 +230,22 @@ def create_job(user, kind, data):
             total=total,
         )
         audit(user, 'job_create', job.id, {'kind': 'semantic_index', 'target': target, 'mode': mode})
+        return job
+
+    if kind == 'reconcile':
+        if not user.is_superuser:
+            raise Problem('僅系統管理者可執行檔案對帳掃描', 403)
+        grace_hours = max(0, min(720, int(data.get('grace_hours', 24))))
+        verify_hashes = bool(data.get('verify_hashes', True))
+        job = BackgroundJob.objects.create(
+            kind='reconcile',
+            actor=user,
+            scope={'mode': 'report'},
+            params={'grace_hours': grace_hours, 'verify_hashes': verify_hashes},
+            algorithm='reconcile-report-v1',
+            total=1,
+        )
+        audit(user, 'job_create', job.id, {'kind': 'reconcile', 'grace_hours': grace_hours})
         return job
 
 
@@ -587,12 +608,14 @@ def _execute_region_recompute_job(job, worker_id):
     completed = int(job.cursor.get('completed', 0))
     failed = int(job.cursor.get('failed', 0))
     only_failed = bool(job.params.get('only_failed'))
+    boundary_version = job.params.get('boundary_version') or None
+    spec = active_boundary_spec(boundary_version)
 
     base_q = Photo.objects.filter(lat__isnull=False, lon__isnull=False)
     if job.dataset_id:
         base_q = base_q.filter(dataset_id=job.dataset_id)
     if only_failed:
-        base_q = base_q.filter(admin_county='')
+        base_q = base_q.exclude(admin_status='ok')
 
     while True:
         chk = _renew_and_check_cancel(job, worker_id)
@@ -608,14 +631,27 @@ def _execute_region_recompute_job(job, worker_id):
         for row in batch:
             lat, lon = row['lat'], row['lon']
             try:
-                county, town, village = reverse_geocode(lat, lon)
+                res = geocode_with_status(
+                    lat,
+                    lon,
+                    boundary_path=spec['path'],
+                    version_label=spec['version'],
+                    expected_sha256=spec['sha256'] or None,
+                )
                 # Guard against stale overwrite if coordinates changed while job was running
                 Photo.objects.filter(id=row['id'], lat=lat, lon=lon).update(
-                    admin_county=county,
-                    admin_town=town,
-                    admin_village=village,
+                    admin_county=res['county'],
+                    admin_town=res['town'],
+                    admin_village=res['village'],
+                    admin_status=res['status'],
+                    admin_version=res['version'],
+                    admin_updated_at=timezone.now(),
+                    admin_error=res['error'][:200],
                 )
-                completed += 1
+                if res['status'] in ('boundary_unavailable', 'failed'):
+                    failed += 1
+                else:
+                    completed += 1
             except Exception:
                 failed += 1
             cursor_id = row['id']
@@ -627,15 +663,15 @@ def _execute_region_recompute_job(job, worker_id):
             updated=timezone.now(),
         )
 
-    final_state = 'partial_failed' if failed > 0 else 'completed'
+    final_state = 'failed' if (failed > 0 and completed == 0) else ('partial_failed' if failed > 0 else 'completed')
     _mark_job_done(
         job,
         worker_id,
         final_state,
         completed_count=completed,
         failed_count=failed,
-        result_data={'processed': completed, 'failed': failed},
-        error=f'{failed} 筆行政區反查失敗' if failed else '',
+        result_data={'processed': completed, 'failed': failed, 'boundary_version': spec['version']},
+        error=f'{failed} 筆行政區反查未完成或邊界不可用' if failed else '',
     )
 
 
@@ -757,6 +793,22 @@ def run_job(job, worker_id):
             _execute_region_recompute_job(job, worker_id)
         elif job.kind == 'semantic_index':
             _execute_semantic_index_job(job, worker_id)
+        elif job.kind == 'reconcile':
+            from .reconcile import run_reconciliation
+            report = run_reconciliation(
+                job.actor,
+                grace_hours=int(job.params.get('grace_hours', 24)),
+                verify_hashes=bool(job.params.get('verify_hashes', True)),
+                job=job,
+            )
+            _mark_job_done(
+                job,
+                worker_id,
+                'completed',
+                completed_count=1,
+                failed_count=0,
+                result_data={'report_id': str(report.id), 'total_issues': report.summary.get('total_issues', 0)},
+            )
         else:
             _mark_job_done(job, worker_id, 'failed', error=f'不支援的工作類型：{job.kind}')
     except Exception as exc:

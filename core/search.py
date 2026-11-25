@@ -6,10 +6,11 @@ and lightweight column projection when JSON/tag predicates are active.
 from datetime import date, datetime, time, timedelta
 import math
 from types import SimpleNamespace
+import uuid
 from zoneinfo import ZoneInfo
 from django.core import signing
 from django.db.models import Count, F, Q
-from .models import Anomaly, Dataset, Membership, Star
+from .models import Anomaly, Dataset, Membership, Star, WorkCollection, WorkCollectionItem
 
 DEFAULT_LIMIT = 100
 MAX_LIMIT = 200
@@ -135,6 +136,25 @@ def _prepare_search(queryset, user, criteria):
         clean_ids = [int(x) for x in raw_ids]
         q = q.filter(id__in=clean_ids)
 
+    collection_id = str(criteria.get('collection') or '').strip()
+    if collection_id:
+        try:
+            col_uuid = uuid.UUID(collection_id)
+        except (ValueError, TypeError) as exc:
+            raise SearchError('工作集合識別碼格式錯誤') from exc
+        if user.is_superuser:
+            col = WorkCollection.objects.filter(id=col_uuid).filter(
+                Q(owner=user) | Q(department__isnull=False, shared=True)
+            ).first()
+        else:
+            user_deps = list(Membership.objects.filter(user=user).values_list('department_id', flat=True))
+            col = WorkCollection.objects.filter(id=col_uuid).filter(
+                Q(owner=user, department__isnull=True) | Q(department_id__in=user_deps, shared=True)
+            ).first()
+        if not col:
+            raise SearchError('找不到工作集合或沒有閱覽權限')
+        q = q.filter(id__in=WorkCollectionItem.objects.filter(collection=col).values('photo_id')).exclude(status='recycled')
+
     burst_group = str(criteria.get('burst_group') or '').strip()
     if burst_group:
         if len(burst_group) > 36:
@@ -257,6 +277,7 @@ def _prepare_search(queryset, user, criteria):
         'bounds': bounds,
         'cluster': cluster,
         'burst_group': burst_group,
+        'collection': collection_id,
     }
     if clean_ids is not None:
         normalized['ids'] = clean_ids

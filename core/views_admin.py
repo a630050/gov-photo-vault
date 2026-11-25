@@ -1,7 +1,13 @@
+import hashlib
+from pathlib import Path
+from django.conf import settings
 from django.contrib.auth.models import User
+from django.db.models import Count
 from django.http import JsonResponse
+from django.utils import timezone
+from .geocoding import clear_boundary_cache, load_boundary_index
 from .helpers import Problem, audit, form_fields, manager, writable
-from .models import Config, Dataset, Department, FormPublication, Item, Membership
+from .models import AdminBoundaryVersion, Config, Dataset, Department, FormPublication, Item, Membership, Photo
 from .permissions import CAPABILITIES, allowed
 
 
@@ -208,5 +214,95 @@ def handle_admin_api(path, data, u):
         Membership.objects.create(user=x, department_id=data['department'], role=data.get('role', 'member'))
         audit(u, path, x.id)
         return JsonResponse({'ok': True})
+
+    if path == 'boundary/list':
+        if not u.is_superuser:
+            raise Problem('僅系統管理者可查看行政區邊界版本', 403)
+        versions = [
+            {
+                'id': b.id,
+                'version': b.version,
+                'source': b.source,
+                'published_date': b.published_date,
+                'sha256': b.sha256,
+                'crs': b.crs,
+                'file_path': b.file_path,
+                'active': b.active,
+                'activated_at': b.activated_at.isoformat() if b.activated_at else None,
+                'imported_by': b.imported_by.username if b.imported_by else '系統預設',
+                'created': b.created.isoformat(),
+            }
+            for b in AdminBoundaryVersion.objects.select_related('imported_by').order_by('-active', '-activated_at', '-id')
+        ]
+        status_counts = {
+            (r['admin_status'] or 'unknown'): r['count']
+            for r in Photo.objects.values('admin_status').annotate(count=Count('id'))
+        }
+        return JsonResponse({'versions': versions, 'status_counts': status_counts})
+
+    if path == 'boundary/save':
+        if not u.is_superuser:
+            raise Problem('僅系統管理者可註冊行政區邊界版本', 403)
+        version = str(data.get('version') or '').strip()
+        source = str(data.get('source') or '').strip()
+        published_date = str(data.get('published_date') or '').strip()
+        crs = str(data.get('crs') or 'EPSG:4326 (WGS84)').strip()
+        file_path = str(data.get('file_path') or '').strip()
+        expected_sha = str(data.get('sha256') or '').strip().lower()
+        if not version or len(version) > 60:
+            raise Problem('請輸入 1 至 60 字的邊界版本識別碼', 422)
+        if not source or len(source) > 250:
+            raise Problem('請輸入來源與授權說明', 422)
+        if not file_path or '..' in Path(file_path).parts:
+            raise Problem('邊界檔案路徑無效', 422)
+        base_dir = Path(settings.BASE_DIR).resolve()
+        candidate = (base_dir / file_path).resolve()
+        try:
+            candidate.relative_to(base_dir)
+        except ValueError as exc:
+            raise Problem('邊界檔案必須位於專案允許目錄內', 422) from exc
+        if not candidate.is_file():
+            raise Problem('找不到指定的邊界檔案', 404)
+        actual_sha = hashlib.sha256(candidate.read_bytes()).hexdigest()
+        if expected_sha and expected_sha != actual_sha:
+            raise Problem('邊界檔案校驗碼不相符', 422)
+        try:
+            clear_boundary_cache()
+            load_boundary_index(str(candidate), expected_sha256=actual_sha)
+        except Exception as exc:
+            raise Problem(f'邊界檔案驗證失敗：{exc}', 422) from exc
+        activate = bool(data.get('activate', True))
+        if activate:
+            AdminBoundaryVersion.objects.update(active=False)
+        obj, created = AdminBoundaryVersion.objects.update_or_create(
+            version=version,
+            defaults={
+                'source': source,
+                'published_date': published_date,
+                'sha256': actual_sha,
+                'crs': crs,
+                'file_path': file_path,
+                'active': activate,
+                'activated_at': timezone.now(),
+                'imported_by': u,
+            },
+        )
+        audit(u, 'boundary_save', obj.id, {'version': version, 'sha256': actual_sha, 'active': activate, 'created': created})
+        return JsonResponse({'ok': True, 'version': obj.version, 'sha256': actual_sha})
+
+    if path == 'boundary/activate':
+        if not u.is_superuser:
+            raise Problem('僅系統管理者可切換行政區邊界版本', 403)
+        version = str(data.get('version') or '').strip()
+        obj = AdminBoundaryVersion.objects.filter(version=version).first()
+        if not obj:
+            raise Problem('找不到指定的邊界版本', 404)
+        AdminBoundaryVersion.objects.update(active=False)
+        obj.active = True
+        obj.activated_at = timezone.now()
+        obj.save(update_fields=['active', 'activated_at'])
+        clear_boundary_cache()
+        audit(u, 'boundary_activate', obj.id, {'version': obj.version})
+        return JsonResponse({'ok': True, 'version': obj.version})
 
     return None
