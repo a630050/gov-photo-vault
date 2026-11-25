@@ -1,13 +1,17 @@
 from datetime import timedelta
 import io
 import json
+from pathlib import Path
+import shutil
+import tempfile
 from unittest.mock import patch
 import zipfile
 from PIL import Image
 from django.contrib.auth.models import User
+from django.core.files.base import ContentFile
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.core.management import call_command
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from django.utils import timezone
 from .jobs import LEASE_SECONDS, claim_next_job, process_one_job, run_job
 from .models import (
@@ -19,6 +23,8 @@ from .models import (
     Membership,
     Notice,
     Photo,
+    PhotoEmbedding,
+    PhotoOcr,
     Request,
     SimilarityPair,
     SimilarityRun,
@@ -318,3 +324,208 @@ class Batch2Tests(TestCase):
         self.assertEqual(p.admin_county, '高雄市')
         detail = self.post('jobs/detail', {'job': job_id}).json()['job']
         self.assertEqual(detail['state'], 'completed')
+
+    def test_f04_cluster_respects_viewport_bounds_exact_repro(self):
+        p1 = Photo.objects.create(dataset=self.ds, uploader=self.member, name='c1.jpg', sha='c1', status='submitted', lat=25.0, lon=121.5)
+        p2 = Photo.objects.create(dataset=self.ds, uploader=self.member, name='c2.jpg', sha='c2', status='submitted', lat=25.0, lon=121.50001)
+        p3 = Photo.objects.create(dataset=self.ds, uploader=self.member, name='c3.jpg', sha='c3', status='submitted', lat=25.0, lon=121.50002)
+
+        bounds = {'north': 25.2, 'south': 24.8, 'east': 121.500015, 'west': 121.3}
+        cl_res = self.post('map_clusters', {'bounds': bounds, 'zoom': 11, 'grid_px': 55})
+        self.assertEqual(cl_res.status_code, 200)
+        clusters = cl_res.json()['clusters']
+        self.assertEqual(len(clusters), 1)
+        c = clusters[0]
+        self.assertEqual(c['count'], 2)
+        self.assertTrue(c.get('cluster_token'))
+
+        # Querying search with cluster_token (as frontend click does) MUST return exactly 2 photos, not 3
+        s_res = self.post('search', {
+            'cluster': {'zoom': c['zoom'], 'bx': c['bx'], 'by': c['by'], 'grid_px': c['grid_px']},
+            'bounds': c['bounds'],
+            'cluster_token': c['cluster_token'],
+            'limit': 100,
+        })
+        self.assertEqual(s_res.status_code, 200)
+        body = s_res.json()
+        self.assertEqual(body['total'], 2)
+        self.assertEqual({x['id'] for x in body['photos']}, {p1.id, p2.id})
+
+        # Even if client omits bounds when passing cluster_token, backend enforces token's exact bounds
+        s_tok = self.post('search', {
+            'cluster': {'zoom': c['zoom'], 'bx': c['bx'], 'by': c['by'], 'grid_px': c['grid_px']},
+            'cluster_token': c['cluster_token'],
+            'limit': 100,
+        })
+        self.assertEqual(s_tok.status_code, 200)
+        self.assertEqual(s_tok.json()['total'], 2)
+        self.assertNotIn(p3.id, {x['id'] for x in s_tok.json()['photos']})
+
+    def test_f02_historical_fields_zero_false_multi_missing(self):
+        it = Item.objects.create(
+            department=self.dep,
+            name='工程檢核',
+            fields=[
+                {'key': 'cnt', 'label': '數量', 'type': 'integer'},
+                {'key': 'ok', 'label': '合格', 'type': 'boolean'},
+                {'key': 'tags_m', 'label': '項目', 'type': 'multi', 'options': ['A', 'B']},
+                {'key': 'legacy_sel', 'label': '舊分類', 'type': 'select', 'options': ['舊甲', '舊乙']},
+            ],
+        )
+        ds = Dataset.objects.create(item=it, name='歷史欄位測試集', creator=self.member)
+        p_match = Photo.objects.create(
+            dataset=ds, uploader=self.member, name='h1.jpg', sha='h1', status='submitted',
+            form_snapshot=it.fields,
+            attrs={'cnt': 0, 'ok': False, 'tags_m': ['A'], 'legacy_sel': '舊甲'},
+        )
+        p_missing = Photo.objects.create(
+            dataset=ds, uploader=self.member, name='h2.jpg', sha='h2', status='submitted',
+            form_snapshot=it.fields[:3],
+            attrs={'cnt': 2, 'ok': True, 'tags_m': ['B']},
+        )
+        # Remove legacy_sel from current item definition
+        it.fields = it.fields[:3]
+        it.save()
+
+        opts = self.post('filter_options', {'datasets': [ds.id], 'status': 'submitted'}).json()
+        legacy = next((f for f in opts['fields'] if f['key'] == 'legacy_sel'), None)
+        self.assertIsNotNone(legacy)
+        self.assertTrue(legacy['historical'])
+        self.assertEqual(legacy['options'], ['舊甲', '舊乙'])
+
+        # Query 0, false, multi, and missing
+        r_zero_false = self.post('search', {
+            'datasets': [ds.id],
+            'fields': [
+                {'key': 'cnt', 'type': 'integer', 'op': 'range', 'min': 0, 'max': 0},
+                {'key': 'ok', 'type': 'boolean', 'op': 'equals', 'value': False},
+                {'key': 'tags_m', 'type': 'multi', 'op': 'in', 'values': ['A']},
+            ],
+        }).json()
+        self.assertEqual([x['id'] for x in r_zero_false['photos']], [p_match.id])
+
+        r_missing = self.post('search', {
+            'datasets': [ds.id],
+            'fields': [{'key': 'legacy_sel', 'type': 'select', 'op': 'missing'}],
+        }).json()
+        self.assertEqual([x['id'] for x in r_missing['photos']], [p_missing.id])
+
+    def test_f09_semantic_index_job_strictly_respects_dataset_scope(self):
+        pa = Photo.objects.create(dataset=self.ds, uploader=self.member, name='a.jpg', sha='sa', status='submitted')
+        pb = Photo.objects.create(dataset=self.other_ds, uploader=self.out, name='b.jpg', sha='sb', status='submitted')
+        vec = [1.0] + [0.0] * 1023
+
+        self.client.force_login(self.admin)
+        res = self.post('jobs/create', {'kind': 'semantic_index', 'target': 'all', 'mode': 'build', 'datasets': [self.ds.id]})
+        self.assertEqual(res.status_code, 200)
+        job_id = res.json()['job']['id']
+        self.assertEqual(res.json()['job']['total'], 2)
+
+        with (
+            patch('core.jobs.semantic_readiness', return_value=True),
+            patch('core.jobs.ocr_readiness', return_value=True),
+            patch('core.semantic.image_vectors', side_effect=lambda rows: [{'id': p.id, 'vector': vec} for p in rows]),
+            patch('core.ocr.ocr_images', side_effect=lambda rows: [{'id': p.id, 'text': f'ok-{p.id}'} for p in rows]),
+        ):
+            job = process_one_job('f09-w1')
+
+        self.assertEqual(job.id.hex, job_id.replace('-', ''))
+        self.assertEqual(job.state, 'completed')
+        self.assertEqual(job.completed_count, 2)
+        self.assertLessEqual(job.completed_count, job.total)
+        # Dataset A indexed; Dataset B completely untouched!
+        self.assertTrue(PhotoEmbedding.objects.filter(photo=pa, state='ready').exists())
+        self.assertTrue(PhotoOcr.objects.filter(photo=pa, state='ready').exists())
+        self.assertFalse(PhotoEmbedding.objects.filter(photo=pb).exists())
+        self.assertFalse(PhotoOcr.objects.filter(photo=pb).exists())
+
+        # Rebuild on dataset A must NOT delete dataset B existing index
+        PhotoEmbedding.objects.create(photo=pb, model_key='chinese-clip-rn50-717ba215-t2s-exif-v1', source_sha='sb', vector=vec, state='ready')
+        self.post('jobs/create', {'kind': 'semantic_index', 'target': 'semantic', 'mode': 'rebuild', 'datasets': [self.ds.id]})
+        with (
+            patch('core.jobs.semantic_readiness', return_value=True),
+            patch('core.semantic.image_vectors', side_effect=lambda rows: [{'id': p.id, 'vector': vec} for p in rows]),
+        ):
+            job_rb = process_one_job('f09-w2')
+        self.assertEqual(job_rb.state, 'completed')
+        self.assertTrue(PhotoEmbedding.objects.filter(photo=pb, state='ready').exists())
+
+    def test_f10_semantic_index_fails_and_preserves_index_when_model_unavailable(self):
+        p = Photo.objects.create(dataset=self.ds, uploader=self.member, name='f10.jpg', sha='s10', status='submitted')
+        vec = [1.0] + [0.0] * 1023
+        PhotoEmbedding.objects.create(
+            photo=p, model_key='chinese-clip-rn50-717ba215-t2s-exif-v1', source_sha='s10', vector=vec, state='ready'
+        )
+
+        self.client.force_login(self.admin)
+        self.post('jobs/create', {'kind': 'semantic_index', 'target': 'semantic', 'mode': 'rebuild', 'datasets': [self.ds.id]})
+        with patch('core.jobs.semantic_readiness', return_value=False):
+            job = process_one_job('f10-w1')
+
+        self.assertEqual(job.state, 'failed')
+        self.assertIn('不可用', job.error)
+        # Existing usable index MUST remain intact!
+        self.assertTrue(PhotoEmbedding.objects.filter(photo=p, state='ready').exists())
+
+        # Partial failure when target='all' and only OCR is unavailable
+        self.post('jobs/create', {'kind': 'semantic_index', 'target': 'all', 'mode': 'rebuild', 'datasets': [self.ds.id]})
+        with (
+            patch('core.jobs.semantic_readiness', return_value=True),
+            patch('core.jobs.ocr_readiness', return_value=False),
+            patch('core.semantic.image_vectors', side_effect=lambda rows: [{'id': r.id, 'vector': vec} for r in rows]),
+        ):
+            job_part = process_one_job('f10-w2')
+        self.assertEqual(job_part.state, 'partial_failed')
+        self.assertIn('OCR', job_part.error)
+
+    def test_f11_partial_export_retry_rebuilds_complete_zip(self):
+        tmp_media = Path(tempfile.mkdtemp(prefix='export_f11_'))
+        try:
+            with override_settings(MEDIA_ROOT=tmp_media):
+                raw1 = _jpeg_bytes((10, 20, 30))
+                raw2 = _jpeg_bytes((90, 100, 110))
+                p1 = Photo.objects.create(dataset=self.ds, uploader=self.member, name='e1.jpg', sha='e1', status='submitted')
+                p1.file.save('e1.jpg', ContentFile(raw1), save=True)
+                p2 = Photo.objects.create(dataset=self.ds, uploader=self.member, name='e2.jpg', sha='e2', status='submitted')
+                p2.file.save('e2.jpg', ContentFile(raw2), save=True)
+
+                # Temporarily move p2's file away to force partial_failed export
+                p2_path = tmp_media / p2.file.name
+                backup_bytes = p2_path.read_bytes()
+                p2_path.unlink()
+
+                res = self.post('jobs/create', {'kind': 'export', 'photos': [p1.id, p2.id]})
+                self.assertEqual(res.status_code, 200)
+                job_id = res.json()['job']['id']
+
+                job1 = process_one_job('f11-w1')
+                self.assertEqual(job1.state, 'partial_failed')
+                self.assertEqual(job1.completed_count, 1)
+                self.assertEqual(job1.failed_count, 1)
+
+                # Retry BEFORE restoring p2 -> MUST stay partial_failed (never mark completed with failed_count=0!)
+                self.assertEqual(self.post('jobs/retry', {'job': job_id}).status_code, 200)
+                job2 = process_one_job('f11-w2')
+                self.assertEqual(job2.state, 'partial_failed')
+                self.assertEqual(job2.failed_count, 1)
+
+                # Restore p2 original file, retry -> ZIP MUST physically contain both photos and metadata rows
+                p2_path.write_bytes(backup_bytes)
+                self.assertEqual(self.post('jobs/retry', {'job': job_id}).status_code, 200)
+                job3 = process_one_job('f11-w3')
+                self.assertEqual(job3.state, 'completed')
+                self.assertEqual(job3.completed_count, 2)
+                self.assertEqual(job3.failed_count, 0)
+
+                exp = Export.objects.filter(job_id=job3.id).first()
+                self.assertIsNotNone(exp)
+                self.assertEqual(set(exp.photo_ids), {p1.id, p2.id})
+                with zipfile.ZipFile(tmp_media / exp.file.name, 'r') as zf:
+                    names = set(zf.namelist())
+                    self.assertIn(f'photos/{p1.id}.jpg', names)
+                    self.assertIn(f'photos/{p2.id}.jpg', names)
+                    csv_text = zf.read('metadata.csv').decode('utf-8-sig')
+                    self.assertIn('e1.jpg', csv_text)
+                    self.assertIn('e2.jpg', csv_text)
+        finally:
+            shutil.rmtree(tmp_media, ignore_errors=True)

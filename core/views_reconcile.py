@@ -57,6 +57,7 @@ def handle_reconcile_api(path, data, u):
             u,
             data.get('paths', []),
             data.get('reason', ''),
+            report_id=data.get('report_id'),
             grace_hours=int(data.get('grace_hours', 24)),
         )
         return JsonResponse({'ok': True, **res})

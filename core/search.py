@@ -15,6 +15,7 @@ from .models import Anomaly, Dataset, Membership, Star, WorkCollection, WorkColl
 DEFAULT_LIMIT = 100
 MAX_LIMIT = 200
 SELECTION_SALT = 'photo-search-selection-v1'
+CLUSTER_SALT = 'photo-map-cluster-v1'
 SELECTION_MAX_AGE = 7200
 
 
@@ -252,6 +253,16 @@ def _prepare_search(queryset, user, criteria):
 
     bounds = _parse_bounds(criteria.get('bounds'))
     cluster = _parse_cluster(criteria.get('cluster'))
+    cluster_token = criteria.get('cluster_token')
+    if cluster_token:
+        try:
+            ct_payload = signing.loads(cluster_token, salt=CLUSTER_SALT, max_age=SELECTION_MAX_AGE)
+        except (signing.SignatureExpired, signing.BadSignature) as exc:
+            raise SearchError('群聚範圍憑證無效或已過期，請重新點選群聚') from exc
+        if ct_payload.get('user_id') != user.id:
+            raise SearchError('群聚範圍憑證不屬於目前登入者')
+        bounds = _parse_bounds(ct_payload.get('bounds'))
+        cluster = _parse_cluster(ct_payload.get('cluster'))
     if bounds:
         q = _apply_bounds(q, bounds)
         missing_time = _apply_bounds(missing_time, bounds)
@@ -413,8 +424,9 @@ def search_photos(queryset, user, criteria):
 
 
 def cluster_map_photos(queryset, user, criteria):
-    clean_criteria = {**(criteria if isinstance(criteria, dict) else {}), 'cluster': None}
-    q, _, tags, rules, _, _ = _prepare_search(queryset, user, clean_criteria)
+    clean_criteria = {**(criteria if isinstance(criteria, dict) else {}), 'cluster': None, 'cluster_token': None}
+    q, normalized, tags, rules, _, _ = _prepare_search(queryset, user, clean_criteria)
+    bounds = normalized.get('bounds')
     try:
         zoom = int(criteria.get('zoom', 11))
         grid_px = int(criteria.get('grid_px', 55))
@@ -468,6 +480,15 @@ def cluster_map_photos(queryset, user, criteria):
             'count': b['count'],
             'single_photo_id': b['first_id'] if b['count'] == 1 else None,
             'single_photo_name': b['first_name'] if b['count'] == 1 else '',
+            'bounds': bounds,
+            'cluster_token': signing.dumps(
+                {
+                    'user_id': user.id,
+                    'bounds': bounds,
+                    'cluster': {'zoom': b['zoom'], 'bx': b['bx'], 'by': b['by'], 'grid_px': b['grid_px']},
+                },
+                salt=CLUSTER_SALT,
+            ),
         }
         for b in bins.values()
     ]

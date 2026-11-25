@@ -19,11 +19,24 @@ function render(){if(map){map.remove();map=null}const caps=Object.values(state.u
 function photos(){return libraryVisiblePhotos()}
 function library(){renderLibrary()}
 
-let selectionAll=null;
+let selectionAll=null,selectionScopeEpoch=0;
 function isPhotoSelected(id){return selectionAll?!selectionAll.excluded.has(id):selected.has(id)}
 function selectedPhotoCount(){return selectionAll?Math.max(0,selectionAll.total-selectionAll.excluded.size):selected.size}
 function setPhotoSelected(id,checked){if(selectionAll){if(checked)selectionAll.excluded.delete(id);else selectionAll.excluded.add(id)}else{if(checked)selected.add(id);else selected.delete(id)}}
-function clearPhotoSelection(){selected.clear();selectionAll=null}
+function clearPhotoSelection(reason=''){
+ const hadSelection=selected.size>0||!!selectionAll;
+ const openBatchDialogs=[...document.querySelectorAll('.ux-dialog-backdrop[data-selection-dialog]')];
+ selected.clear();
+ selectionAll=null;
+ selectionScopeEpoch++;
+ for(const el of openBatchDialogs)el.remove();
+ if(openBatchDialogs.length)toast(reason||'查詢條件或選取範圍已變更，已取消原批次確認視窗');
+ const sc=$('.selected-count');
+ if(sc)sc.textContent='已選 0 張';
+ if(hadSelection){
+  document.querySelectorAll('[data-select]').forEach(cb=>{cb.checked=false});
+ }
+}
 function selectionPayload(explicitList=null){if(selectionAll&&!explicitList)return {selection_token:selectionAll.token,excluded_photos:[...selectionAll.excluded]};return {photos:explicitList||[...selected]}}
 function drawCards(list, options={}){
  const container=$('#cards');if(!container)return;
@@ -96,7 +109,7 @@ function drawCards(list, options={}){
  });
  container.querySelectorAll('[data-open]').forEach(x=>x.onclick=()=>{const pid=+x.dataset.open,g=burstMap.get(pid);if(g)openBurstModal(g);else openPhoto(pid)});
  container.querySelectorAll('[data-burst-open]').forEach(b=>b.onclick=e=>{e.stopPropagation();const pid=+b.dataset.burstOpen,g=burstMap.get(pid);if(g)openBurstModal(g);else{const ph=display.find(item=>item.id===pid);if(ph)openBurstModal([ph])}});
- container.querySelectorAll('[data-select]').forEach(x=>x.onclick=e=>{e.stopPropagation();setPhotoSelected(+x.dataset.select,x.checked);if(typeof drawLibraryResults==='function'&&tab==='library')drawLibraryResults();else $('.selected-count').textContent=`已選 ${selectedPhotoCount()} 張`});
+ container.querySelectorAll('[data-select]').forEach(x=>x.onclick=e=>{e.stopPropagation();setPhotoSelected(+x.dataset.select,x.checked);if(typeof drawLibraryResults==='function'&&tab==='library')drawLibraryResults(false);else $('.selected-count').textContent=`已選 ${selectedPhotoCount()} 張`});
  container.querySelectorAll('[data-select-group]').forEach(b=>b.onclick=e=>{
   e.stopPropagation();const pid=+b.dataset.selectGroup,ph=display.find(item=>item.id===pid),g=burstMap.get(pid)||(ph?[ph]:null);if(!g)return;
   const gid=g[0].burst_group,matchedCount=gid?(matchedByGroup[gid]||g.length):g.length;
@@ -105,7 +118,7 @@ function drawCards(list, options={}){
    if(gid&&matchedCount>g.length&&typeof fetchMatchedBurstGroup==='function'){targetGroup=await fetchMatchedBurstGroup(gid)||g}
    const allSelected=targetGroup.every(x=>isPhotoSelected(x.id));
    for(const x of targetGroup)setPhotoSelected(x.id,!allSelected);
-   if(typeof drawLibraryResults==='function'&&tab==='library')drawLibraryResults();
+   if(typeof drawLibraryResults==='function'&&tab==='library')drawLibraryResults(false);
    toast(allSelected?`已取消選取該連拍組 ${targetGroup.length} 張`:`已選取該連拍組符合條件的 ${targetGroup.length} 張`);
   });
  });
@@ -123,8 +136,8 @@ function openBurstModal(group){
   const allSelected=selectedInGroup===sorted.length;
   m.innerHTML=`<section class="card ux-dialog ux-burst-dialog" role="dialog" aria-modal="true" aria-label="連拍照片組"><div class="toolbar"><h2>連拍照片組（目前符合 ${sorted.length}／可閱覽共 ${totalCount} 張）</h2><button type="button" id="burst-modal-select-group">${allSelected?'取消整組選取':'選取整組符合條件 ('+sorted.length+' 張)'}</button><button type="button" data-ux-close>關閉 Esc</button></div><p class="muted">系統依拍攝時間差與影像指紋自動收合；僅對目前符合搜尋條件的 ${sorted.length} 張進行選取。已選 ${selectedInGroup} 張。</p><div class="burst-grid">${sorted.map(p=>`<article class="burst-item ${p.burst_cover?'is-cover':''}"><img src="${p.preview}" alt="${esc(p.name)}" loading="lazy"><div class="burst-item-info"><label class="check" style="margin:0 0 6px"><input type="checkbox" data-burst-select="${p.id}" ${isPhotoSelected(p.id)?'checked':''}><strong>${esc(p.name)}</strong></label><span class="muted">${p.captured?esc(new Date(p.captured).toLocaleString('zh-TW',{timeZone:'Asia/Taipei'})):'無拍攝時間'}</span>${p.burst_cover?`<span class="badge">★ ${p.burst_cover_manual?'人工精選首圖':'目前封面首圖'}</span>`:''}<div class="row" style="margin-top:8px"><button type="button" data-burst-view="${p.id}">檢視大圖</button>${(p.can_write&&!ds(p.dataset)?.archived&&!p.burst_cover)?`<button type="button" class="primary" data-burst-cover="${p.id}">★ 設為精選首圖</button>`:''}</div></div></article>`).join('')}</div></section>`;
   m.querySelectorAll('[data-ux-close]').forEach(b=>b.onclick=()=>m.remove());
-  $('#burst-modal-select-group').onclick=()=>{for(const x of sorted)setPhotoSelected(x.id,!allSelected);renderModal();if(typeof drawLibraryResults==='function'&&tab==='library')drawLibraryResults()};
-  m.querySelectorAll('[data-burst-select]').forEach(cb=>cb.onchange=()=>{setPhotoSelected(+cb.dataset.burstSelect,cb.checked);renderModal();if(typeof drawLibraryResults==='function'&&tab==='library')drawLibraryResults()});
+  $('#burst-modal-select-group').onclick=()=>{for(const x of sorted)setPhotoSelected(x.id,!allSelected);renderModal();if(typeof drawLibraryResults==='function'&&tab==='library')drawLibraryResults(false)};
+  m.querySelectorAll('[data-burst-select]').forEach(cb=>cb.onchange=()=>{setPhotoSelected(+cb.dataset.burstSelect,cb.checked);renderModal();if(typeof drawLibraryResults==='function'&&tab==='library')drawLibraryResults(false)});
   m.querySelectorAll('[data-burst-view]').forEach(b=>b.onclick=()=>openPhoto(+b.dataset.burstView));
   m.querySelectorAll('[data-burst-cover]').forEach(b=>b.onclick=()=>action(async()=>{
    const pid=+b.dataset.burstCover;
@@ -143,14 +156,16 @@ function openBurstModal(group){
   fetchMatchedBurstGroup(gid).then(full=>{if(full&&full.length&&m.isConnected){sorted=full.sort((a,b)=>(a.captured||'').localeCompare(b.captured||'')||a.id-b.id);renderModal()}}).catch(()=>{});
  }
 }
-function openConfirmDialog({title,message,confirmLabel='確認執行',onConfirm}){
+function openConfirmDialog({title,message,confirmLabel='確認執行',selectionBound=false,onConfirm}){
  document.querySelector('.ux-dialog-backdrop')?.remove();
+ const openEpoch=selectionScopeEpoch;
  const m=document.createElement('div');m.className='form-preview-backdrop ux-dialog-backdrop';
+ if(selectionBound)m.dataset.selectionDialog='1';
  m.innerHTML=`<section class="card ux-dialog" role="dialog" aria-modal="true" aria-label="${esc(title)}"><div class="toolbar"><h2>${esc(title)}</h2><button type="button" data-ux-close>關閉</button></div><p>${esc(message)}</p><div class="row" style="margin-top:16px"><button type="button" data-ux-close>取消</button><button type="button" id="ux-confirm-ok" class="primary">${esc(confirmLabel)}</button></div></section>`;
  document.body.append(m);
  const ok=$('#ux-confirm-ok');ok.focus();
  m.querySelectorAll('[data-ux-close]').forEach(b=>b.onclick=()=>m.remove());
- ok.onclick=()=>action(async()=>{ok.disabled=true;try{await onConfirm();m.remove()}finally{if(ok.isConnected)ok.disabled=false}});
+ ok.onclick=()=>action(async()=>{if(selectionBound&&openEpoch!==selectionScopeEpoch){m.remove();toast('選取範圍已變更，請重新確認選取結果');return}ok.disabled=true;try{await onConfirm();m.remove()}finally{if(ok.isConnected)ok.disabled=false}});
 }
 function attachBaseMaps(targetMap){
  const Grid=L.GridLayer.extend({createTile(c){const t=document.createElement('canvas');t.width=t.height=256;const ctx=t.getContext('2d');ctx.fillStyle='#eaf0ec';ctx.fillRect(0,0,256,256);ctx.strokeStyle='#cbd8d1';ctx.strokeRect(0,0,256,256);ctx.fillStyle='#8da097';ctx.font='11px sans-serif';ctx.fillText(`Z${c.z} / ${c.x} / ${c.y}`,12,22);return t}});
@@ -172,16 +187,18 @@ function payload(p,form){let fd=new FormData(form),attrs={};for(let f of p.field
 async function openPhoto(id){
  const res=await api('photo_detail',{photo:id});
  const p=res.photo;photoCacheUpsert([p]);current=p;compare=false;document.querySelector('.modal')?.remove();let m=document.createElement('div');m.className='modal';m.innerHTML=`<div class="bar"><strong>${esc(p.name)}</strong>${p.can_download?'<button id="toggle-original" aria-pressed="false">載入原圖檢視</button>':''}<button id="toggleprop">屬性（空白鍵／右鍵）</button><button id="compare">比對附近照片</button><button id="close">關閉 Esc</button></div><div class="viewer"><div class="image-area" id="single"><img src="${p.preview}" draggable="false" alt="${esc(p.name)}"></div><aside class="properties" id="props"><h3>照片屬性</h3><p class="muted">${esc(dep(p.department)?.name)} / ${esc(ds(p.dataset)?.name)}</p><span class="badge">${esc(p.status)}</span><span class="badge">表單 v${p.form_version}</span><form id="meta"><label>拍攝時間（臺灣時間）</label><input type="datetime-local" name="captured" step="1" value="${p.captured?new Date(new Date(p.captured).getTime()+8*3600000).toISOString().slice(0,19):''}"><label class="check"><input type="checkbox" name="time_confirmed" ${p.time_confirmed?'checked':''}>已確認時間與時區</label><div class="row"><div><label>緯度</label><input type="number" step="any" name="lat" value="${p.lat??''}"></div><div><label>經度</label><input type="number" step="any" name="lon" value="${p.lon??''}"></div></div>${p.county?`<p class="muted" style="margin:6px 0">行政區（自動反查${p.admin_version?' · '+esc(p.admin_version):''}）：<strong>${esc(p.county)} ${esc(p.town)} ${esc(p.village)}</strong></p>`:(p.admin_status?`<p class="muted" style="margin:6px 0">行政區狀態：<strong>${esc(adminStatusLabels[p.admin_status]||p.admin_status)}</strong>${p.admin_error?'（'+esc(p.admin_error)+'）':''}</p>`:'')}${(p.status==='draft'||(p.status==='submitted'&&p.can_write))?'<button type="button" id="pick-photo-location">地圖點選定位</button>':''}${fields(p)}${p.status==='draft'?'<button type="button" id="save">儲存草稿</button><button type="button" class="primary" id="submit">正式提交</button><button type="button" id="discard">放棄草稿</button>':p.status==='submitted'&&p.can_write?'<button type="button" id="correct">申請上述資料更正</button>':''}</form><hr><button id="star">${p.star?'★ 取消收藏':'☆ 打星收藏'}</button><button id="addtag">新增標籤</button>${p.can_write?'<button id="anomaly">人工異常標註</button>':''}${p.status==='submitted'&&p.can_write?'<button id="delete" class="danger">申請刪除</button><button id="move">申請搬移</button>':''}${p.status==='recycled'&&p.can_manage?'<button id="restore">復原照片</button>':''}<p>${p.tags.map(t=>`<span class="badge">${esc(t)}</span>`).join('')}</p><a href="${p.original}" style="color:#135c58">下載原始照片（需權限）</a><h4>人工異常</h4>${p.anomalies.map(a=>`<p>${esc(a.text)} <span class="badge warn">${esc(a.state)}</span><br>${esc(a.resolution)} ${p.can_manage?`<button data-resolve="${a.id}">處理／重開</button>`:''}</p>`).join('')||'<p class="muted">尚無異常標註</p>'}</aside></div>`;document.body.append(m);$('#close').onclick=()=>m.remove();if($('#toggle-original'))$('#toggle-original').onclick=e=>{const img=$('#single img'),orig=e.target.getAttribute('aria-pressed')!=='true';img.src=orig?p.original:p.preview;e.target.setAttribute('aria-pressed',orig);e.target.textContent=orig?'切回預覽圖':'載入原圖檢視';toast(orig?'已切換為高解析原圖（細節檢視模式）':'已切回標準預覽圖')};$('#toggleprop').onclick=()=>$('#props').classList.toggle('hidden');$('#single').oncontextmenu=e=>{e.preventDefault();$('#props').classList.toggle('hidden')};zoom($('#single'));for(let op of ['save','submit','discard'])if($('#'+op))$('#'+op).onclick=()=>action(async()=>{await api(op,payload(p,$('#meta')));await refresh();openPhoto(id);toast(op==='submit'?'已正式提交':'已儲存')});$('#star').onclick=()=>action(async()=>{await api('star',{photo:id});await refresh();openPhoto(id)});$('#addtag').onclick=()=>openTagDialog({title:'新增照片標籤',onConfirm:async tags=>{await api('tags',{photo:id,tags});await refresh();openPhoto(id)}});if($('#anomaly'))$('#anomaly').onclick=()=>openAnomalyDialog(id,()=>{openPhoto(id)});if($('#move'))$('#move').onclick=()=>openMoveDialog(p);if($('#restore'))$('#restore').onclick=()=>action(async()=>{await api('restore',{photo:id});await refresh();openPhoto(id)});document.querySelectorAll('[data-resolve]').forEach(b=>b.onclick=()=>{const a=p.anomalies.find(x=>x.id===+b.dataset.resolve);if(a)openResolveAnomalyDialog(a,async()=>{await refresh();openPhoto(id)})});$('#compare').onclick=()=>compareView(p);if($('#pick-photo-location'))$('#pick-photo-location').onclick=()=>{const form=$('#meta');openMapPickerModal({lat:form.lat.value?Number(form.lat.value):null,lon:form.lon.value?Number(form.lon.value):null,datasetId:p.dataset,onPick:(la,lo)=>{form.lat.value=la.toFixed(6);form.lon.value=lo.toFixed(6);toast('已套用新座標，請記得儲存或提出更正申請')}})};if(typeof enhancePhotoModal==='function')enhancePhotoModal(p)}
-function openTagDialog({title,hint,onConfirm}){
+function openTagDialog({title,hint,selectionBound=false,onConfirm}){
  document.querySelector('.ux-dialog-backdrop')?.remove();
+ const openEpoch=selectionScopeEpoch;
  const known=availableTags();
  const m=document.createElement('div');m.className='form-preview-backdrop ux-dialog-backdrop';
+ if(selectionBound)m.dataset.selectionDialog='1';
  m.innerHTML=`<section class="card ux-dialog" role="dialog" aria-modal="true" aria-label="${esc(title)}"><div class="toolbar"><h2>${esc(title)}</h2><button type="button" data-ux-close>關閉</button></div>${hint?`<p class="muted">${esc(hint)}</p>`:''}<form id="ux-tag-form"><label for="ux-tag-input">標籤名稱（多個請以逗號分隔）</label><input id="ux-tag-input" required placeholder="例如：護岸巡查, 待修繕" autocomplete="off">${known.length?`<div class="ux-quick-section"><span class="muted">點擊加入現有常用標籤：</span><div class="tag-chips">${known.map(t=>`<button type="button" class="tag-chip" data-quick-tag="${esc(t)}">＋ ${esc(t)}</button>`).join('')}</div></div>`:''}<div class="row" style="margin-top:16px"><button type="button" data-ux-close>取消</button><button type="submit" class="primary">確認新增</button></div></form></section>`;
  document.body.append(m);
  const input=$('#ux-tag-input');input.focus();
  m.querySelectorAll('[data-ux-close]').forEach(b=>b.onclick=()=>m.remove());
  m.querySelectorAll('[data-quick-tag]').forEach(b=>b.onclick=()=>{const cur=input.value.split(/[,，]/).map(s=>s.trim()).filter(Boolean);if(!cur.includes(b.dataset.quickTag))cur.push(b.dataset.quickTag);input.value=cur.join(', ');input.focus()});
- $('#ux-tag-form').onsubmit=e=>{e.preventDefault();const tags=input.value.split(/[,，]/).map(s=>s.trim()).filter(Boolean);if(!tags.length)return toast('請輸入至少一個標籤');action(async()=>{await onConfirm(tags);m.remove()})};
+ $('#ux-tag-form').onsubmit=e=>{e.preventDefault();if(selectionBound&&openEpoch!==selectionScopeEpoch){m.remove();toast('選取範圍已變更，請重新確認選取結果');return}const tags=input.value.split(/[,，]/).map(s=>s.trim()).filter(Boolean);if(!tags.length)return toast('請輸入至少一個標籤');action(async()=>{if(selectionBound&&openEpoch!==selectionScopeEpoch){m.remove();toast('選取範圍已變更，請重新確認選取結果');return}await onConfirm(tags);m.remove()})};
 }
 function openAnomalyDialog(photoId,onDone){
  document.querySelector('.ux-dialog-backdrop')?.remove();

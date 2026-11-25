@@ -1,14 +1,52 @@
-const uploadWorkspace={department:null,dataset:null,active:null,selected:new Set(),edits:new Map(),messages:[],busy:false,rows:[],loadedDataset:null,loading:false};
-function resetUpload(){uploadWorkspace.department=null;uploadWorkspace.dataset=null;uploadWorkspace.active=null;uploadWorkspace.selected.clear();uploadWorkspace.edits.clear();uploadWorkspace.messages=[];uploadWorkspace.rows=[];uploadWorkspace.loadedDataset=null;uploadWorkspace.loading=false}
+const uploadWorkspace={department:null,dataset:null,active:null,selected:new Set(),edits:new Map(),messages:[],busy:false,rows:[],total:0,hasNext:false,nextOffset:null,loadedDataset:null,loading:false,loadingMore:false,loadError:'',loadSeq:0};
+function resetUpload(){uploadWorkspace.department=null;uploadWorkspace.dataset=null;uploadWorkspace.active=null;uploadWorkspace.selected.clear();uploadWorkspace.edits.clear();uploadWorkspace.messages=[];uploadWorkspace.rows=[];uploadWorkspace.total=0;uploadWorkspace.hasNext=false;uploadWorkspace.nextOffset=null;uploadWorkspace.loadedDataset=null;uploadWorkspace.loading=false;uploadWorkspace.loadingMore=false;uploadWorkspace.loadError='';uploadWorkspace.loadSeq++}
 function uploadPhoto(p){return uploadWorkspace.edits.get(p.id)||{...p,attrs:structuredClone(p.attrs)}}
 function uploadRows(){return (uploadWorkspace.rows||[]).filter(p=>p.dataset===uploadWorkspace.dataset&&p.status==='draft'&&(p.uploader===state.user.name||p.can_manage))}
-async function loadUploadDrafts(dsId){
- const w=uploadWorkspace;if(!dsId){w.rows=[];w.loadedDataset=null;return}
- w.loading=true;
+async function loadUploadDrafts(dsId,opts={}){
+ const w=uploadWorkspace,{append=false,targetCount=0}=opts;
+ if(!dsId){w.rows=[];w.total=0;w.hasNext=false;w.nextOffset=null;w.loadedDataset=null;w.loadError='';return}
+ const seq=++w.loadSeq;
+ if(append)w.loadingMore=true;else w.loading=true;
+ w.loadError='';
  try{
-  const r=await api('search',{datasets:[dsId],status:'draft',limit:200});
-  if(w.dataset===dsId){w.rows=r.photos||[];w.loadedDataset=dsId;if(typeof photoCacheUpsert==='function')photoCacheUpsert(w.rows)}
- }finally{w.loading=false}
+  let offset=append?(w.nextOffset??w.rows.length):0;
+  let first=true;
+  while(first||(!append&&targetCount>w.rows.length&&w.hasNext)){
+   first=false;
+   const r=await api('search',{datasets:[dsId],status:'draft',limit:200,offset});
+   if(seq!==w.loadSeq||w.dataset!==dsId)return;
+   const batch=r.photos||[];
+   if(offset===0){
+    w.rows=batch;
+   }else{
+    const seen=new Set(w.rows.map(x=>x.id));
+    w.rows=[...w.rows,...batch.filter(x=>!seen.has(x.id))];
+   }
+   w.total=r.total??w.rows.length;
+   w.hasNext=!!r.has_next;
+   w.nextOffset=r.next_offset;
+   w.loadedDataset=dsId;
+   if(typeof photoCacheUpsert==='function')photoCacheUpsert(batch);
+   if(!w.hasNext||w.nextOffset==null)break;
+   offset=w.nextOffset;
+   if(append)break;
+  }
+ }catch(e){
+  if(seq===w.loadSeq&&w.dataset===dsId)w.loadError=e.message||'載入草稿失敗';
+ }finally{
+  if(seq===w.loadSeq){w.loading=false;w.loadingMore=false}
+ }
+}
+async function loadAllUploadDrafts(selectAfter=false){
+ const w=uploadWorkspace,dsId=w.dataset;if(!dsId)return;
+ while(w.hasNext&&!w.loadError&&w.dataset===dsId){
+  await loadUploadDrafts(dsId,{append:true});
+  if(w.dataset!==dsId)return;
+ }
+ if(selectAfter&&!w.loadError&&w.dataset===dsId){
+  for(const p of uploadRows())w.selected.add(p.id);
+ }
+ if(tab==='upload')renderUpload();
 }
 function uploadChosen(){return uploadRows().filter(p=>uploadWorkspace.selected.has(p.id))}
 function localCapture(value){return value?new Date(new Date(value).getTime()+8*3600000).toISOString().slice(0,19):''}
@@ -36,19 +74,24 @@ function renderUpload(){
  ${template?`<details class="assigned-preview"><summary>查看本次使用的表單欄位</summary><div class="row">${template.fields.map(f=>`<span class="badge">${esc(f.label)}${f.required?' · 必填':''}</span>`).join('')||'<span class="muted">僅系統時間與座標欄位</span>'}</div></details>`:''}
  <form id="upload-files-form"><div class="upload-zone"><label for="upload-files">加入照片以擷取時間、座標與建立預覽</label><input id="upload-files" type="file" multiple accept="image/jpeg,image/png,image/webp,image/heic" ${!template||w.busy?'disabled':''}><p class="muted">每批最多 500 張，每張 50 MB。本機可讀 JPEG、PNG、WebP；HEIC 需另裝解碼器。</p><button class="primary" id="receive-files" ${!template||w.busy?'disabled':''}>${w.busy?'處理中…':'上傳並建立草稿'}</button></div></form><div id="upload-progress" role="status"></div>
  ${w.messages.length?`<details class="upload-results" open><summary>最近操作結果</summary>${w.messages.map(m=>`<p class="${m.error?'error':''}">${esc(m.name)}：${esc(m.message)}</p>`).join('')}</details>`:''}</section>
- <div class="toolbar"><h2>檢查草稿 <span class="muted">${rows.length} 張</span></h2><button id="upload-select-all" ${w.busy?'disabled':''}>全選草稿</button><button id="upload-select-none" ${w.busy?'disabled':''}>取消全選</button><span id="upload-selection-count"></span></div>
+ <div class="toolbar"><h2>檢查草稿 <span class="muted">已載入 ${rows.length}／共 ${w.total} 張${w.loading?'（載入中…）':w.loadingMore?'（載入更多中…）':''}</span></h2><button id="upload-select-all" ${w.busy?'disabled':''}>${w.hasNext?`全選已載入 (${rows.length})`:'全選草稿'}</button>${w.hasNext?`<button id="upload-load-more" ${(w.busy||w.loadingMore)?'disabled':''}>${w.loadingMore?'載入中…':`載入更多（剩餘 ${Math.max(0,w.total-rows.length)} 張）`}</button><button id="upload-load-all" ${(w.busy||w.loadingMore)?'disabled':''}>載入並全選全部 (${w.total} 張)</button>`:''}<button id="upload-select-none" ${w.busy?'disabled':''}>取消全選</button><span id="upload-selection-count"></span></div>
+ ${w.loadError?`<div class="metadata-warning" role="alert">草稿載入失敗：${esc(w.loadError)} <button type="button" id="upload-retry-load">重試載入</button></div>`:''}
  <div id="upload-bulk"></div><div class="upload-review-workspace"><section id="upload-photo-list" class="upload-photo-list"></section><section id="upload-photo-editor" class="card upload-photo-editor"></section></div>
  <div class="upload-submit-bar"><span id="upload-save-status" role="status">草稿可先儲存，稍後繼續。</span><button id="save-upload-selected" ${w.busy?'disabled':''}>儲存已選草稿</button><button id="review-upload-submit" class="primary" ${w.busy?'disabled':''}>檢查並確認提交</button></div>`;
- $('#upload-department').onchange=e=>{w.department=+e.target.value;w.dataset=null;w.loadedDataset=null;w.rows=[];w.selected.clear();renderUpload()};$('#upload-dataset').onchange=e=>{w.dataset=+e.target.value;w.loadedDataset=null;w.rows=[];w.active=null;w.selected.clear();w.messages=[];renderUpload()};
+ $('#upload-department').onchange=e=>{w.department=+e.target.value;w.dataset=null;w.loadedDataset=null;w.rows=[];w.total=0;w.hasNext=false;w.nextOffset=null;w.loadError='';w.loadSeq++;w.selected.clear();renderUpload()};$('#upload-dataset').onchange=e=>{w.dataset=+e.target.value;w.loadedDataset=null;w.rows=[];w.total=0;w.hasNext=false;w.nextOffset=null;w.loadError='';w.loadSeq++;w.active=null;w.selected.clear();w.messages=[];renderUpload()};
  $('#upload-files-form').onsubmit=e=>{e.preventDefault();action(receiveUploadFiles)};
- $('#upload-select-all').onclick=()=>{rows.forEach(p=>w.selected.add(p.id));drawUploadList();drawUploadBulk()};$('#upload-select-none').onclick=()=>{w.selected.clear();drawUploadList();drawUploadBulk()};
+ $('#upload-select-all').onclick=()=>{rows.forEach(p=>w.selected.add(p.id));drawUploadList();drawUploadBulk();if(w.hasNext)toast(`已選取目前已載入的 ${rows.length} 張；尚有 ${Math.max(0,w.total-rows.length)} 張未載入`)};
+ if($('#upload-load-more'))$('#upload-load-more').onclick=()=>action(async()=>{await loadUploadDrafts(w.dataset,{append:true});if(tab==='upload')renderUpload()});
+ if($('#upload-load-all'))$('#upload-load-all').onclick=()=>action(()=>loadAllUploadDrafts(true));
+ if($('#upload-retry-load'))$('#upload-retry-load').onclick=()=>action(async()=>{await loadUploadDrafts(w.dataset,{append:w.rows.length>0});if(tab==='upload')renderUpload()});
+ $('#upload-select-none').onclick=()=>{w.selected.clear();drawUploadList();drawUploadBulk()};
  $('#save-upload-selected').onclick=()=>action(async()=>{const chosen=uploadChosen();if(!chosen.length)return toast('請先勾選草稿');await persistUploadRows(chosen);renderUpload()});
  $('#review-upload-submit').onclick=()=>action(reviewUploadSubmit);
  drawUploadList();drawUploadBulk();drawUploadEditor();
- if(w.dataset&&w.loadedDataset!==w.dataset&&!w.loading){action(async()=>{await loadUploadDrafts(w.dataset);if(tab==='upload')renderUpload()})}
+ if(w.dataset&&w.loadedDataset!==w.dataset&&!w.loading&&!w.loadError){action(async()=>{await loadUploadDrafts(w.dataset);if(tab==='upload')renderUpload()})}
 }
 function drawUploadList(){
- const w=uploadWorkspace,rows=uploadRows();$('#upload-selection-count').textContent=`已選 ${uploadChosen().length} 張`;
+ const w=uploadWorkspace,rows=uploadRows();$('#upload-selection-count').textContent=`已選 ${uploadChosen().length} 張${w.hasNext?'（已載入 '+rows.length+'／共 '+w.total+' 張）':''}`;
  $('#upload-photo-list').innerHTML=rows.length?rows.map(raw=>{const p=uploadPhoto(raw),missing=missingFields(p);return `<article class="draft-tile ${w.active===p.id?'is-current':''}"><label class="draft-select"><input type="checkbox" data-upload-check="${p.id}" ${w.selected.has(p.id)?'checked':''} ${w.busy?'disabled':''} aria-label="選取 ${esc(p.name)}"></label><button type="button" data-upload-open="${p.id}" ${w.busy?'disabled':''}><img loading="lazy" src="${p.preview}" alt="${esc(p.name)}"><strong>${esc(p.name)}</strong><span class="muted">${esc(displayCapture(p.captured))}</span><span class="draft-coordinates">${p.lat==null?'待補座標':`${Number(p.lat).toFixed(6)}, ${Number(p.lon).toFixed(6)}`}</span><span class="badge ${missing.length?'warn':''}">${missing.length?'缺 '+missing.length+' 個必填':'表單已填妥'}</span>${w.edits.has(p.id)?'<span class="badge warn">未儲存修改</span>':''}</button></article>`}).join(''):'<div class="empty">選擇照片上傳後，會在這裡顯示草稿與擷取結果。</div>';
  document.querySelectorAll('[data-upload-check]').forEach(x=>x.onchange=()=>{x.checked?w.selected.add(+x.dataset.uploadCheck):w.selected.delete(+x.dataset.uploadCheck);$('#upload-selection-count').textContent=`已選 ${uploadChosen().length} 張`;drawUploadBulk()});
  document.querySelectorAll('[data-upload-open]').forEach(b=>b.onclick=()=>{w.active=+b.dataset.uploadOpen;drawUploadList();drawUploadEditor()});
@@ -87,7 +130,7 @@ async function receiveUploadFiles(){
    const fd=new FormData();fd.append('dataset',dataset.id);fd.append('form_id',template.id);fd.append('form_version',template.version);fd.append('files',file);
    try{const r=await api('upload',fd);for(const result of r.results){w.messages.push({name:result.name,error:!!result.error,message:result.error||'已建立草稿，請檢查後提交'});if(result.id)ids.push(result.id)}}catch(e){w.messages.push({name:file.name,error:true,message:e.message});if(e.message.includes('表單已更新'))break}
   }
-  state=await api('state');await loadUploadDrafts(w.dataset);w.selected=new Set(ids);w.active=ids[0]||w.active;
+  state=await api('state');await loadUploadDrafts(w.dataset,{targetCount:Math.max(200,w.rows.length)});w.selected=new Set(ids);w.active=ids[0]||w.active;
  }finally{w.busy=false;renderUpload()}
 }
 async function persistUploadRows(rows){
@@ -100,7 +143,7 @@ async function persistUploadRows(rows){
     if(res.error){w.messages.push({name:res.name,error:true,message:res.error})}
     else{w.edits.delete(res.id);w.messages.push({name:res.name,message:'草稿已儲存'})}
    }
-   state=await api('state');await loadUploadDrafts(w.dataset);
+   state=await api('state');await loadUploadDrafts(w.dataset,{targetCount:Math.max(200,w.rows.length)});
   }
  }catch(e){w.messages.push({name:'批次儲存',error:true,message:e.message})}
  finally{w.busy=false}
@@ -112,7 +155,7 @@ async function reviewUploadSubmit(){
  const rows=uploadChosen().filter(p=>!failed.has(p.name)&&!w.edits.has(p.id)),valid=rows.filter(p=>!missingFields(p).length),invalid=rows.filter(p=>missingFields(p).length);
  const overlay=document.createElement('div');overlay.className='form-preview-backdrop';overlay.innerHTML=`<section class="card submit-review" role="dialog" aria-modal="true" aria-label="確認提交照片"><h2>確認提交照片</h2><p>本次勾選 ${chosen.length} 張，可提交 ${valid.length} 張。</p>${invalid.length?`<div class="metadata-warning">以下 ${invalid.length} 張保留草稿，請補填必填欄位：${invalid.map(p=>`<p>${esc(p.name)}：${esc(missingFields(p).join('、'))}</p>`).join('')}</div>`:''}${w.messages.filter(m=>m.error).map(m=>`<p class="error">${esc(m.name)}：${esc(m.message)}</p>`).join('')}<div class="submit-review-list">${valid.map(p=>`<div><strong>${esc(p.name)}</strong><p>${esc(displayCapture(p.captured))} · ${p.lat==null?'待補座標':`${esc(p.lat)}, ${esc(p.lon)}`}</p><small>${p.fields.map(f=>esc(f.label)+': '+esc(Array.isArray(p.attrs[f.key])?p.attrs[f.key].join('、'):p.attrs[f.key]??'未填')).join(' · ')}</small></div>`).join('')}</div><p class="muted">${valid.filter(p=>!p.captured||p.lat==null).length} 張缺少時間或位置，提交後會列為待補。提交後修改正式資料需提出更正申請。</p><label class="check"><input id="confirm-upload-reviewed" type="checkbox">我已檢查表單、拍攝時間與座標，確認提交以上可提交照片</label><div class="row"><button id="cancel-upload-review">返回修改</button><button id="confirm-upload-submit" class="primary" disabled>確認提交 ${valid.length} 張</button></div></section>`;document.body.append(overlay);
  $('#confirm-upload-reviewed').onchange=e=>$('#confirm-upload-submit').disabled=!e.target.checked||!valid.length;$('#cancel-upload-review').onclick=()=>overlay.remove();
- $('#confirm-upload-submit').onclick=()=>action(async()=>{const button=$('#confirm-upload-submit');button.disabled=true;$('#cancel-upload-review').disabled=true;w.busy=true;w.messages=[];try{const items=valid.map(p=>({photo:p.id,version:p.version,captured:p.captured,time_confirmed:p.time_confirmed,lat:p.lat,lon:p.lon,attrs:p.attrs}));const r=await api('batch_submit',{items});for(const res of r.results){if(res.error){w.messages.push({name:res.name,error:true,message:res.error})}else{w.messages.push({name:res.name,message:'已正式提交'});w.selected.delete(res.id)}}state=await api('state');await loadUploadDrafts(w.dataset);toast(`已提交 ${w.messages.filter(m=>!m.error).length} 張；未成功者保留草稿`)}finally{w.busy=false;overlay.remove();renderUpload()}});
+ $('#confirm-upload-submit').onclick=()=>action(async()=>{const button=$('#confirm-upload-submit');button.disabled=true;$('#cancel-upload-review').disabled=true;w.busy=true;w.messages=[];try{const items=valid.map(p=>({photo:p.id,version:p.version,captured:p.captured,time_confirmed:p.time_confirmed,lat:p.lat,lon:p.lon,attrs:p.attrs}));const r=await api('batch_submit',{items});for(const res of r.results){if(res.error){w.messages.push({name:res.name,error:true,message:res.error})}else{w.messages.push({name:res.name,message:'已正式提交'});w.selected.delete(res.id)}}state=await api('state');await loadUploadDrafts(w.dataset,{targetCount:Math.max(200,w.rows.length)});toast(`已提交 ${w.messages.filter(m=>!m.error).length} 張；未成功者保留草稿`)}finally{w.busy=false;overlay.remove();renderUpload()}});
 }
 
 window.addEventListener('beforeunload',e=>{if(uploadWorkspace.edits.size||uploadWorkspace.busy){e.preventDefault();e.returnValue=''}});

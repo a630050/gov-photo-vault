@@ -18,11 +18,32 @@ async function loadSavedSearchesPanel(){
     return;
    }
    const ss=j.saved_search,c=ss.criteria||{};
+   let preloadedOpts=null;
+   if((c.fields||[]).length||(c.datasets||[]).length===1){
+    try{
+     preloadedOpts=await api('filter_options',{departments:c.departments||[],datasets:c.datasets||[],status:c.status||'submitted',county:c.county||'',town:c.town||''});
+    }catch(err){
+     openConfirmDialog({title:'無法載入欄位定義',message:`載入此常用搜尋所需的欄位定義失敗（${err.message||'連線錯誤'}），為避免條件被靜默放寬，已取消套用。`,confirmLabel:'知道了',onConfirm:async()=>{}});
+     return;
+    }
+    if((c.fields||[]).length){
+     const defs=new Map((preloadedOpts.fields||[]).map(f=>[f.key+'|'+(f.type||'text'),f]));
+     const missingRules=(c.fields||[]).filter(rule=>!defs.has(rule.key+'|'+rule.type));
+     if(missingRules.length){
+      openConfirmDialog({title:'常用搜尋欄位已失效',message:`以下自訂欄位定義已不存在，系統不會自動放寬為全部範圍：\n${missingRules.map(x=>x.key).join('、')}`,confirmLabel:'知道了',onConfirm:async()=>{}});
+      return;
+     }
+    }
+   }
    resetLibrary();
    filter.deps=c.departments||[];filter.datasets=c.datasets||[];filter.tag=(c.tags||[]).join(',');
    filter.text=c.text||'';filter.from=c.from||'';filter.to=c.to||'';filter.star=!!c.star;
    filter.status=c.status||'submitted';filter.county=c.county||'';filter.town=c.town||'';filter.village=c.village||'';
    libraryState.anomaly=c.anomaly||'';libraryState.mode=ss.display_mode==='wall'?'wall':'map';
+   if(preloadedOpts){
+    libraryState.filterOptions=preloadedOpts;
+    libraryState.filterOptionsScope=currentFilterOptionsScopeKey();
+   }
    for(const rule of (c.fields||[])){
     const key=rule.key+'|'+rule.type;
     if(rule.op==='missing')libraryState.fields[key]={missing:true};
@@ -51,15 +72,19 @@ function openSaveSearchDialog(){
 function openAddToCollectionDialog(payloadData, count){
  if(!count)return toast('請先勾選要加入集合的照片');
  document.querySelector('.ux-dialog-backdrop')?.remove();
+ const openEpoch=selectionScopeEpoch;
  action(async()=>{
   const r=await api('collections/list',{});
+  if(openEpoch!==selectionScopeEpoch){toast('選取範圍已變更，請重新確認選取結果');return}
   const editableCols=(r.collections||[]).filter(c=>c.can_manage);
   const m=document.createElement('div');m.className='form-preview-backdrop ux-dialog-backdrop';
+  m.dataset.selectionDialog='1';
   m.innerHTML=`<section class="card ux-dialog" role="dialog" aria-modal="true" aria-label="加入工作集合"><div class="toolbar"><h2>加入工作集合（已選 ${count} 張）</h2><button type="button" data-ux-close>關閉</button></div><p class="muted">集合僅保存照片關聯，不複製原圖或不改變所屬資料集；失權或回收後自動不可見。</p>${editableCols.length?`<form id="ux-col-add-form"><label for="ux-col-select">選擇工作集合</label><select id="ux-col-select">${editableCols.map(c=>`<option value="${esc(c.id)}">${esc(c.name)}（${c.shared?esc(c.department_name)+' 共享':'個人'} · ${c.photo_count} 張）</option>`).join('')}</select><div class="row" style="margin-top:14px"><button type="button" data-ux-close>取消</button><button type="submit" class="primary">確認加入 ${count} 張</button></div></form>`:'<p class="metadata-warning">尚無可維護的工作集合，請先至「工作集合」分頁建立。</p>'}<div style="margin-top:10px"><button type="button" id="ux-goto-collections">前往工作集合管理</button></div></section>`;
   document.body.append(m);
   m.querySelectorAll('[data-ux-close]').forEach(b=>b.onclick=()=>m.remove());
   $('#ux-goto-collections').onclick=()=>{m.remove();tab='collections';render()};
   if($('#ux-col-add-form'))$('#ux-col-add-form').onsubmit=e=>{e.preventDefault();action(async()=>{
+   if(openEpoch!==selectionScopeEpoch){m.remove();toast('選取範圍已變更，請重新確認選取結果');return}
    const res=await api('collections/add_items',{collection:$('#ux-col-select').value,...payloadData});
    m.remove();toast(`已新增 ${res.added} 張照片至工作集合「${res.collection.name}」`);
   })};

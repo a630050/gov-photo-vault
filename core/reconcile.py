@@ -29,8 +29,64 @@ from .ocr_engine import MODEL_KEY as OCR_MODEL_KEY
 from .semantic_engine import MODEL_KEY as SEMANTIC_MODEL_KEY
 
 
+PROTECTED_FILENAMES = {'.photo-storage-id', 'thumbs.db', 'desktop.ini'}
+PROTECTED_SUFFIXES = ('.lock', '.lck', '.pid', '.part', '.tmp')
+
+
 def _rel_norm(path_str):
     return str(path_str or '').replace('\\', '/').lstrip('/')
+
+
+def _is_symlink_or_junction(path_obj):
+    try:
+        if path_obj.is_symlink() or os.path.islink(path_obj):
+            return True
+        if hasattr(os.path, 'isjunction') and os.path.isjunction(path_obj):
+            return True
+        st = os.lstat(path_obj)
+        if getattr(st, 'st_file_attributes', 0) & 0x400:
+            return True
+    except OSError:
+        return False
+    return False
+
+
+def is_protected_storage_rel(rel):
+    """Return True if rel is invalid, traverses outside root, or names a protected control/runtime file."""
+    if not rel or '\x00' in str(rel):
+        return True
+    raw = str(rel).replace('\\', '/')
+    if raw.startswith('/') or os.path.splitdrive(raw)[0] or ':' in raw.split('/', 1)[0]:
+        return True
+    parts = Path(raw).parts
+    if not parts:
+        return True
+    for part in parts:
+        if not part or part in ('.', '..') or part.startswith('.'):
+            return True
+    lower = parts[-1].lower()
+    if lower in PROTECTED_FILENAMES or lower.endswith(PROTECTED_SUFFIXES):
+        return True
+    return False
+
+
+def _resolve_confined_path(media_root, rel):
+    """Ensure every path segment under media_root is non-symlink/non-junction and resolves inside root."""
+    if is_protected_storage_rel(rel):
+        return None, '受保護檔案或路徑不合法'
+    cur = media_root
+    for part in Path(rel).parts:
+        cur = cur / part
+        if _is_symlink_or_junction(cur):
+            return None, '偵測到符號連結或目錄連結，拒絕越界操作'
+    try:
+        resolved = cur.resolve()
+        resolved.relative_to(media_root)
+    except (OSError, ValueError):
+        return None, '超出儲存目錄範圍'
+    if _is_symlink_or_junction(resolved):
+        return None, '拒絕存取連結檔案'
+    return resolved, ''
 
 
 def _file_size(media_root, rel):
@@ -132,7 +188,9 @@ def run_reconciliation(actor=None, *, grace_hours=24, job=None, verify_hashes=Tr
     """Run non-destructive storage & index reconciliation and persist a report."""
     grace_hours = max(0, min(720, int(grace_hours)))
     now = timezone.now()
-    cutoff_ts = (now - timedelta(hours=grace_hours)).timestamp()
+    grace_td = timedelta(hours=grace_hours)
+    cutoff_dt = now - grace_td
+    cutoff_ts = cutoff_dt.timestamp()
     media_root = Path(settings.MEDIA_ROOT).resolve()
 
     issues = []
@@ -145,19 +203,63 @@ def run_reconciliation(actor=None, *, grace_hours=24, job=None, verify_hashes=Tr
         'ocr_gap': 0,
         'face_gap': 0,
         'external_stale': 0,
+        'stalled_job': 0,
     }
+    deferred_counts = {
+        'missing_original': 0,
+        'missing_preview': 0,
+        'semantic_gap': 0,
+        'ocr_gap': 0,
+        'face_gap': 0,
+    }
+    truncated = {}
 
-    def add_issue(kind, **detail):
+    def record_issue(kind, per_kind_cap=300, **detail):
         counts[kind] += 1
-        if len(issues) < 300:
+        if counts[kind] > per_kind_cap or len(issues) >= 300:
+            truncated[kind] = True
+        else:
             issues.append({'kind': kind, **detail})
 
+    def in_grace(created_dt):
+        return bool(grace_hours > 0 and created_dt and created_dt >= cutoff_dt)
+
     referenced_rels = set()
-    active_job_photos = set()
-    for scope in BackgroundJob.objects.filter(state__in=('pending', 'running')).values_list('scope', flat=True):
-        if isinstance(scope, dict):
-            for pid in scope.get('photo_ids') or []:
-                active_job_photos.add(pid)
+    active_photo_ids = set()
+    active_sem_all = False
+    active_ocr_all = False
+    active_sem_datasets = set()
+    active_ocr_datasets = set()
+
+    stalled_td = timedelta(hours=max(1, grace_hours))
+    for jb in BackgroundJob.objects.filter(state__in=('pending', 'running')).values(
+        'id', 'kind', 'state', 'scope', 'params', 'lease_until', 'created', 'updated'
+    ):
+        is_stalled = (
+            (jb['state'] == 'running' and jb['lease_until'] and jb['lease_until'] < now and jb['updated'] < now - stalled_td)
+            or (jb['state'] == 'pending' and jb['created'] < now - stalled_td)
+        )
+        if is_stalled:
+            record_issue('stalled_job', per_kind_cap=100, job_id=str(jb['id']), job_kind=jb['kind'], state=jb['state'])
+            continue
+        scope = jb['scope'] if isinstance(jb['scope'], dict) else {}
+        params = jb['params'] if isinstance(jb['params'], dict) else {}
+        for pid in scope.get('photo_ids') or []:
+            active_photo_ids.add(pid)
+        if jb['kind'] == 'semantic_index':
+            target = params.get('target', 'all')
+            ds_list = scope.get('datasets') or []
+            if not ds_list:
+                if target in ('all', 'semantic'):
+                    active_sem_all = True
+                if target in ('all', 'ocr'):
+                    active_ocr_all = True
+            else:
+                for did in ds_list:
+                    if target in ('all', 'semantic'):
+                        active_sem_datasets.add(did)
+                    if target in ('all', 'ocr'):
+                        active_ocr_datasets.add(did)
 
     # 1, 2, 4: Photo file integrity checks
     for p in Photo.objects.values('id', 'name', 'sha', 'status', 'dataset_id', 'file', 'preview', 'created').iterator(chunk_size=500):
@@ -168,27 +270,39 @@ def run_reconciliation(actor=None, *, grace_hours=24, job=None, verify_hashes=Tr
         if p_rel:
             referenced_rels.add(p_rel)
 
-        # Skip in-flight newly created drafts or active job targets for missing checks if within grace period
+        active_media = in_grace(p['created']) and p['id'] in active_photo_ids
         orig_path = media_root / f_rel if f_rel else None
         if not f_rel or not orig_path or not orig_path.is_file():
-            add_issue('missing_original', photo_id=p['id'], name=p['name'], path=f_rel)
+            if active_media:
+                deferred_counts['missing_original'] += 1
+            else:
+                record_issue('missing_original', photo_id=p['id'], name=p['name'], path=f_rel)
         elif verify_hashes and p['sha']:
             try:
                 actual_sha = hashlib.sha256(orig_path.read_bytes()).hexdigest()
                 if actual_sha != p['sha']:
-                    add_issue('hash_mismatch', photo_id=p['id'], name=p['name'], expected=p['sha'], actual=actual_sha)
+                    record_issue('hash_mismatch', photo_id=p['id'], name=p['name'], expected=p['sha'], actual=actual_sha)
             except OSError:
-                add_issue('missing_original', photo_id=p['id'], name=p['name'], path=f_rel)
+                if active_media:
+                    deferred_counts['missing_original'] += 1
+                else:
+                    record_issue('missing_original', photo_id=p['id'], name=p['name'], path=f_rel)
 
         prev_path = media_root / p_rel if p_rel else None
         if not p_rel or not prev_path or not prev_path.is_file():
-            add_issue('missing_preview', photo_id=p['id'], name=p['name'], path=p_rel, reason='縮圖不存在')
+            if active_media:
+                deferred_counts['missing_preview'] += 1
+            else:
+                record_issue('missing_preview', photo_id=p['id'], name=p['name'], path=p_rel, reason='縮圖不存在')
         else:
             try:
                 with Image.open(prev_path) as im:
                     im.verify()
             except (OSError, UnidentifiedImageError, ValueError):
-                add_issue('missing_preview', photo_id=p['id'], name=p['name'], path=p_rel, reason='縮圖無法讀取')
+                if active_media:
+                    deferred_counts['missing_preview'] += 1
+                else:
+                    record_issue('missing_preview', photo_id=p['id'], name=p['name'], path=p_rel, reason='縮圖無法讀取')
 
     for rel in Export.objects.values_list('file', flat=True):
         if rel:
@@ -197,15 +311,20 @@ def run_reconciliation(actor=None, *, grace_hours=24, job=None, verify_hashes=Tr
         if rel:
             referenced_rels.add(_rel_norm(rel))
 
-    # 3: Orphan files under MEDIA_ROOT (excluding hidden control files, active jobs, and files within grace window)
+    # 3: Orphan files under MEDIA_ROOT (excluding protected control files, symlinks/junctions, and files within grace window)
+    orphan_paths = {}
     if media_root.is_dir():
-        for root, _, files in os.walk(media_root):
+        for root, dirs, files in os.walk(media_root, followlinks=False):
+            dirs[:] = [
+                d for d in dirs
+                if not d.startswith('.') and not _is_symlink_or_junction(Path(root) / d)
+            ]
             for fname in files:
-                if fname.startswith('.'):
-                    continue
                 full = Path(root) / fname
+                if _is_symlink_or_junction(full):
+                    continue
                 rel = _rel_norm(full.relative_to(media_root))
-                if rel in referenced_rels:
+                if is_protected_storage_rel(rel) or rel in referenced_rels:
                     continue
                 try:
                     st = full.stat()
@@ -213,7 +332,9 @@ def run_reconciliation(actor=None, *, grace_hours=24, job=None, verify_hashes=Tr
                     continue
                 if grace_hours > 0 and st.st_mtime >= cutoff_ts:
                     continue
-                add_issue('orphan_file', path=rel, size=st.st_size)
+                if len(orphan_paths) < 5000:
+                    orphan_paths[rel] = {'size': st.st_size, 'mtime': st.st_mtime}
+                record_issue('orphan_file', path=rel, size=st.st_size)
 
     # 5: Content (semantic + OCR) index gaps on submitted photos
     submitted_q = Photo.objects.filter(status='submitted')
@@ -222,36 +343,49 @@ def run_reconciliation(actor=None, *, grace_hours=24, job=None, verify_hashes=Tr
             model_key=SEMANTIC_MODEL_KEY, state='ready', source_sha=F('photo__sha')
         ).values_list('photo_id', flat=True)
     )
-    for pid in submitted_q.exclude(id__in=ready_sem).values_list('id', flat=True)[:200]:
-        add_issue('semantic_gap', photo_id=pid, model=SEMANTIC_MODEL_KEY)
-    counts['semantic_gap'] = submitted_q.exclude(id__in=ready_sem).count()
+    for row in submitted_q.exclude(id__in=ready_sem).values('id', 'dataset_id', 'created').iterator(chunk_size=500):
+        if in_grace(row['created']) and (
+            row['id'] in active_photo_ids or active_sem_all or row['dataset_id'] in active_sem_datasets
+        ):
+            deferred_counts['semantic_gap'] += 1
+        else:
+            record_issue('semantic_gap', per_kind_cap=100, photo_id=row['id'], model=SEMANTIC_MODEL_KEY)
 
     ready_ocr = set(
         PhotoOcr.objects.filter(
             model_key=OCR_MODEL_KEY, state='ready', source_sha=F('photo__sha')
         ).values_list('photo_id', flat=True)
     )
-    for pid in submitted_q.exclude(id__in=ready_ocr).values_list('id', flat=True)[:200]:
-        add_issue('ocr_gap', photo_id=pid, model=OCR_MODEL_KEY)
-    counts['ocr_gap'] = submitted_q.exclude(id__in=ready_ocr).count()
+    for row in submitted_q.exclude(id__in=ready_ocr).values('id', 'dataset_id', 'created').iterator(chunk_size=500):
+        if in_grace(row['created']) and (
+            row['id'] in active_photo_ids or active_ocr_all or row['dataset_id'] in active_ocr_datasets
+        ):
+            deferred_counts['ocr_gap'] += 1
+        else:
+            record_issue('ocr_gap', per_kind_cap=100, photo_id=row['id'], model=OCR_MODEL_KEY)
 
     # 6: Face index failed/outdated checks (where face indexing has been run)
     stale_face_q = FacePhotoIndex.objects.exclude(state='ready', source_sha=F('photo__sha'))
-    counts['face_gap'] = stale_face_q.count()
-    for row in stale_face_q.values('photo_id', 'state', 'error')[:100]:
-        add_issue('face_gap', photo_id=row['photo_id'], state=row['state'], error=row['error'])
+    for row in stale_face_q.values('photo_id', 'state', 'error', 'photo__created').iterator(chunk_size=500):
+        if in_grace(row['photo__created']) and row['photo_id'] in active_photo_ids:
+            deferred_counts['face_gap'] += 1
+        else:
+            record_issue('face_gap', per_kind_cap=100, photo_id=row['photo_id'], state=row['state'], error=row['error'])
 
     # 7: External gateway stalled receipts/grants
     from .models import ExternalImportReceipt
-    stale_ext_q = ExternalImportReceipt.objects.filter(state='importing', updated__lt=now - timedelta(hours=max(1, grace_hours)))
-    counts['external_stale'] = stale_ext_q.count()
-    for row in stale_ext_q.values('id', 'grant_id', 'updated')[:100]:
-        add_issue('external_stale', receipt_id=str(row['id']), grant_id=str(row['grant_id']))
+    stale_ext_q = ExternalImportReceipt.objects.filter(state='importing', updated__lt=now - stalled_td)
+    for row in stale_ext_q.values('id', 'grant_id', 'updated').iterator(chunk_size=500):
+        record_issue('external_stale', per_kind_cap=100, receipt_id=str(row['id']), grant_id=str(row['grant_id']))
 
     summary = {
         'counts': counts,
         'total_issues': sum(counts.values()),
+        'deferred_counts': deferred_counts,
+        'total_deferred': sum(deferred_counts.values()),
+        'truncated': truncated,
         'grace_hours': grace_hours,
+        'orphan_paths': orphan_paths,
         'capacity': compute_capacity_report(),
         'non_destructive': True,
     }
@@ -301,17 +435,48 @@ def repair_missing_previews(actor, photo_ids=None):
     return {'repaired': repaired, 'failed': failed}
 
 
-def confirm_orphan_cleanup(actor, paths, reason, grace_hours=24):
-    """Delete explicitly confirmed orphan files only after re-checking DB refs and grace period."""
+def confirm_orphan_cleanup(actor, paths, reason, *, report_id=None, grace_hours=24):
+    """Delete explicitly confirmed report-bound orphan files only after live safety verification."""
     reason = str(reason or '').strip()
     if not reason:
         raise Problem('請填寫清理確認理由', 422)
     if not isinstance(paths, list) or not paths:
         raise Problem('請勾選要清理的孤立檔案路徑', 422)
+    if not report_id:
+        raise Problem('清理孤立檔必須綁定有效的對帳報告（缺少 report_id）', 422)
+    try:
+        report_uuid = uuid.UUID(str(report_id))
+    except (ValueError, TypeError) as exc:
+        raise Problem('對帳報告識別碼格式無效', 422) from exc
+    report = StorageReconcileReport.objects.filter(id=report_uuid).first()
+    if not report:
+        raise Problem('找不到指定的對帳報告', 404)
+
+    reported_orphans = report.summary.get('orphan_paths')
+    if not isinstance(reported_orphans, dict):
+        reported_orphans = {
+            item['path']: {'size': item.get('size')}
+            for item in (report.issues or [])
+            if item.get('kind') == 'orphan_file' and item.get('path')
+        }
 
     grace_hours = max(1, int(grace_hours))
     cutoff_ts = (timezone.now() - timedelta(hours=grace_hours)).timestamp()
     media_root = Path(settings.MEDIA_ROOT).resolve()
+
+    # Pre-screen every requested path first so protected control files / traversals / links are strictly rejected
+    normalized_targets = []
+    for raw_rel in paths[:200]:
+        raw_str = str(raw_rel or '')
+        if not raw_str or raw_str.replace('\\', '/').startswith('/'):
+            audit(actor, 'reconcile_orphan_cleanup_rejected', str(report.id), {'path': raw_str, 'reason': '絕對或空白路徑'})
+            raise Problem('拒絕清理受保護檔案、控制檔或無效／越界路徑', 422)
+        rel = _rel_norm(raw_str)
+        resolved, err = _resolve_confined_path(media_root, rel)
+        if err:
+            audit(actor, 'reconcile_orphan_cleanup_rejected', str(report.id), {'path': raw_str, 'reason': err})
+            raise Problem(f'拒絕清理（{err}）：{rel or raw_str}', 422)
+        normalized_targets.append((rel, resolved))
 
     referenced = set()
     for rel in Photo.objects.values_list('file', flat=True):
@@ -327,27 +492,52 @@ def confirm_orphan_cleanup(actor, paths, reason, grace_hours=24):
         if rel:
             referenced.add(_rel_norm(rel))
 
+    active_job_pids = set()
+    for scope in BackgroundJob.objects.filter(state__in=('pending', 'running')).values_list('scope', flat=True):
+        if isinstance(scope, dict):
+            for pid in scope.get('photo_ids') or []:
+                active_job_pids.add(pid)
+    if active_job_pids:
+        for f_rel, p_rel in Photo.objects.filter(id__in=active_job_pids).values_list('file', 'preview'):
+            if f_rel:
+                referenced.add(_rel_norm(f_rel))
+            if p_rel:
+                referenced.add(_rel_norm(p_rel))
+
     deleted = []
     skipped = []
-    for raw_rel in paths[:200]:
-        rel = _rel_norm(raw_rel)
-        if not rel or '..' in Path(rel).parts or rel in referenced:
-            skipped.append({'path': rel, 'reason': '目前仍有資料庫引用或路徑無效'})
+    for rel, full in normalized_targets:
+        if rel not in reported_orphans:
+            skipped.append({'path': rel, 'reason': '檔案不在指定對帳報告的孤立檔清單中'})
             continue
-        full = (media_root / rel).resolve()
-        try:
-            full.relative_to(media_root)
-        except ValueError:
-            skipped.append({'path': rel, 'reason': '超出儲存目錄範圍'})
+        if rel in referenced:
+            skipped.append({'path': rel, 'reason': '目前仍有資料庫引用或進行中工作關聯'})
+            continue
+        if _is_symlink_or_junction(full):
+            skipped.append({'path': rel, 'reason': '拒絕刪除符號連結或目錄連結'})
             continue
         if not full.is_file():
             skipped.append({'path': rel, 'reason': '檔案已不存在'})
             continue
-        if full.stat().st_mtime >= cutoff_ts:
+        try:
+            st = full.lstat()
+        except OSError:
+            skipped.append({'path': rel, 'reason': '無法讀取檔案狀態'})
+            continue
+        if st.st_mtime >= cutoff_ts:
             skipped.append({'path': rel, 'reason': f'尚未超過 {grace_hours} 小時寬限期'})
+            continue
+        expected_size = reported_orphans[rel].get('size') if isinstance(reported_orphans[rel], dict) else None
+        if expected_size is not None and st.st_size != expected_size:
+            skipped.append({'path': rel, 'reason': '檔案大小與對帳報告時不一致，請重新對帳'})
             continue
         full.unlink()
         deleted.append(rel)
 
-    audit(actor, 'reconcile_orphan_cleanup', len(deleted), {'deleted': deleted, 'skipped': skipped, 'reason': reason})
-    return {'deleted': deleted, 'skipped': skipped}
+    audit(
+        actor,
+        'reconcile_orphan_cleanup',
+        len(deleted),
+        {'report_id': str(report.id), 'deleted': deleted, 'skipped': skipped, 'reason': reason},
+    )
+    return {'report_id': str(report.id), 'deleted': deleted, 'skipped': skipped}

@@ -9,10 +9,15 @@ def pending_ocr_photos(q):
     return q.filter(status='submitted').exclude(id__in=done)
 
 
-def index_ocr_batch(limit=5, retry=False):
+def index_ocr_batch(limit=5, retry=False, dataset_ids=None):
     q = Photo.objects.filter(status='submitted').order_by('id')
+    if dataset_ids:
+        q = q.filter(dataset_id__in=dataset_ids)
     if retry:
-        PhotoOcr.objects.filter(model_key=MODEL_KEY, state='failed').delete()
+        failed_q = PhotoOcr.objects.filter(model_key=MODEL_KEY, state='failed')
+        if dataset_ids:
+            failed_q = failed_q.filter(photo__dataset_id__in=dataset_ids)
+        failed_q.delete()
     rows = list(pending_ocr_photos(q)[:limit])
     if not rows:
         return 0

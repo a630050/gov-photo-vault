@@ -17,10 +17,16 @@ def pending_photos(q):
     done=PhotoEmbedding.objects.filter(model_key=MODEL_KEY,source_sha=F('photo__sha')).values('photo_id')
     return q.filter(status='submitted').exclude(id__in=done)
 
-def index_batch(limit=5,retry=False):
-    """System indexing, independent of search scope. Retrieval always scopes before ranking."""
+def index_batch(limit=5,retry=False,dataset_ids=None):
+    """Index submitted photos within optional dataset_ids scope (or system-wide when omitted)."""
     q=Photo.objects.filter(status='submitted').order_by('id')
-    if retry:PhotoEmbedding.objects.filter(model_key=MODEL_KEY,state='failed').delete()
+    if dataset_ids:
+        q=q.filter(dataset_id__in=dataset_ids)
+    if retry:
+        failed_q=PhotoEmbedding.objects.filter(model_key=MODEL_KEY,state='failed')
+        if dataset_ids:
+            failed_q=failed_q.filter(photo__dataset_id__in=dataset_ids)
+        failed_q.delete()
     rows=list(pending_photos(q)[:limit])
     if not rows:return 0
     results={r['id']:r for r in image_vectors(rows)}

@@ -27,8 +27,12 @@ let libraryState={
  loadingMore:false,
  loadError:'',
  filterOptions:null,
+ filterOptionsSeq:0,
+ filterOptionsScope:'',
+ filterOptionsError:'',
  pinnedIds:null,
  pinnedLabel:'',
+ baseCriteriaKey:'',
  criteriaKey:'',
  displayCache:[],
  burstMap:new Map(),
@@ -45,7 +49,8 @@ function resetLibrary(){
  libraryState.fields={};libraryState.anomaly='';libraryState.summary=null;libraryState.total=0;
  libraryState.hasNext=false;libraryState.nextOffset=null;libraryState.selectionToken='';
  libraryState.loadingMore=false;libraryState.loadError='';libraryState.filterOptions=null;
- libraryState.pinnedIds=null;libraryState.pinnedLabel='';libraryState.criteriaKey='';
+ libraryState.filterOptionsSeq++;libraryState.filterOptionsScope='';libraryState.filterOptionsError='';
+ libraryState.pinnedIds=null;libraryState.pinnedLabel='';libraryState.baseCriteriaKey='';libraryState.criteriaKey='';
  filter={deps:[],items:[],datasets:[],dataset:'',tag:'',text:'',from:'',to:'',star:false,status:'submitted',county:'',town:'',village:''};
  clearPhotoSelection();
 }
@@ -53,10 +58,19 @@ function availableRegions(){
  const opts=libraryState.filterOptions||state?.filter_options||{counties:[],towns:[],villages:[]};
  return {counties:opts.counties||[],towns:opts.towns||[],villages:opts.villages||[]};
 }
+function currentFilterOptionsScopeKey(){
+ return JSON.stringify({
+  deps:[...filter.deps].sort((a,b)=>a-b),
+  datasets:[...filter.datasets].sort((a,b)=>a-b),
+  status:filter.status,
+  county:filter.county,
+  town:filter.town,
+ });
+}
 function libraryVisiblePhotos(){return libraryState.items}
 function libraryFieldDefinitions(){
  if(filter.deps.length||filter.datasets.length!==1)return [];
- if(libraryState.filterOptions?.fields?.length)return libraryState.filterOptions.fields;
+ if(libraryState.filterOptionsScope===currentFilterOptionsScopeKey()&&libraryState.filterOptions?.fields?.length)return libraryState.filterOptions.fields;
  const dataset=ds(filter.datasets[0]);if(!dataset)return [];
  return (item(dataset.item_id)?.fields||[]).map(f=>({...f,type:f.type||'text',historical:false}));
 }
@@ -80,8 +94,11 @@ function currentLibraryCriteria(includeMapScope=true){
  };
  if(ls.pinnedIds)c.ids=ls.pinnedIds;
  if(includeMapScope&&ls.mode==='map'&&map){
-  if(ls.group)c.cluster=ls.group;
-  else if(ls.follow){
+  if(ls.group){
+   c.cluster={zoom:ls.group.zoom,bx:ls.group.bx,by:ls.group.by,grid_px:ls.group.grid_px};
+   if(ls.group.bounds)c.bounds=ls.group.bounds;
+   if(ls.group.cluster_token)c.cluster_token=ls.group.cluster_token;
+  }else if(ls.follow){
    const b=map.getBounds();
    c.bounds={north:b.getNorth(),south:b.getSouth(),east:b.getEast(),west:b.getWest()};
   }
@@ -96,15 +113,24 @@ async function fetchMatchedBurstGroup(burstGroup){
  return r.photos||[];
 }
 async function refreshLibraryFilterOptions(){
- const seq=libraryState.sequence;
+ const optSeq=++libraryState.filterOptionsSeq;
+ const optScope=currentFilterOptionsScopeKey();
+ libraryState.filterOptionsError='';
  try{
   const opts=await api('filter_options',{departments:filter.deps,datasets:filter.datasets,status:filter.status,county:filter.county,town:filter.town});
-  if(seq!==libraryState.sequence||tab!=='library')return;
+  if(optSeq!==libraryState.filterOptionsSeq||currentFilterOptionsScopeKey()!==optScope||tab!=='library')return;
   libraryState.filterOptions=opts;
+  libraryState.filterOptionsScope=optScope;
+  libraryState.filterOptionsError='';
   drawLibraryRegionControls();
   drawLibraryTagChips();
   drawLibraryFieldFilters();
- }catch{}
+  if(Object.keys(libraryState.fields).length>0&&libraryRules().length>0)scheduleLibrarySearch(0,true);
+ }catch(e){
+  if(optSeq!==libraryState.filterOptionsSeq||currentFilterOptionsScopeKey()!==optScope||tab!=='library')return;
+  libraryState.filterOptionsError=e.message||'載入篩選選項失敗';
+  drawLibraryFieldFilters();
+ }
 }
 function drawLibraryRegionControls(){
  const regions=availableRegions();
@@ -175,7 +201,7 @@ function renderLibrary(){
  $('#selectall').onclick=()=>{
   if(!ls.total||!ls.selectionToken)return toast('目前沒有可選取的搜尋結果');
   clearPhotoSelection();
-  selectionAll={token:ls.selectionToken,total:ls.total,excluded:new Set()};
+  selectionAll={token:ls.selectionToken,total:ls.total,excluded:new Set(),scopeKey:ls.criteriaKey,scopeEpoch:selectionScopeEpoch};
   drawLibraryResults(false);
   toast(`已跨頁選取全部符合條件的結果共 ${ls.total} 張（含連拍堆疊組內符合照片）`);
  };
@@ -183,12 +209,12 @@ function renderLibrary(){
  $('#batchstar').onclick=()=>{
   const count=selectedPhotoCount();if(!count)return toast('請先勾選照片');
   const payloadData=selectionPayload();
-  openConfirmDialog({title:'確認批量打星',message:`已選取 ${count} 張照片（跨頁全選最多處理 500 張），將為其中尚未打星的項目加上個人星號，確定執行？`,confirmLabel:`打星 ${count} 張`,onConfirm:async()=>{const res=await api('batch_star',payloadData);await refresh();toast(`已為 ${res.count} 張新照片加上星號（共檢核 ${res.matched??count} 張）`)}});
+  openConfirmDialog({title:'確認批量打星',message:`已選取 ${count} 張照片（跨頁全選最多處理 500 張），將為其中尚未打星的項目加上個人星號，確定執行？`,confirmLabel:`打星 ${count} 張`,selectionBound:true,onConfirm:async()=>{const res=await api('batch_star',payloadData);await refresh();toast(`已為 ${res.count} 張新照片加上星號（共檢核 ${res.matched??count} 張）`)}});
  };
  $('#batchtag').onclick=()=>{
   const count=selectedPhotoCount();if(!count)return toast('請先勾選照片');
   const payloadData=selectionPayload();
-  openTagDialog({title:`批量新增標籤（共 ${count} 張）`,hint:`將為實際已選取的 ${count} 張照片（跨頁全選上限 500 張）新增以下標籤。`,onConfirm:async tags=>{const batch=crypto.randomUUID();const res=await api('batch_tags',{...payloadData,tags,batch});lastTagBatch=batch;await refresh();toast(`已為 ${res.count} 張照片新增標籤`)}});
+  openTagDialog({title:`批量新增標籤（共 ${count} 張）`,hint:`將為實際已選取的 ${count} 張照片（跨頁全選上限 500 張）新增以下標籤。`,selectionBound:true,onConfirm:async tags=>{const batch=crypto.randomUUID();const res=await api('batch_tags',{...payloadData,tags,batch});lastTagBatch=batch;await refresh();toast(`已為 ${res.count} 張照片新增標籤`)}});
  };
  $('#undo-lib-tags').onclick=()=>action(async()=>{await api('undo_tags',{batch:lastTagBatch});lastTagBatch=null;await refresh()});
  $('#addtocollection').onclick=()=>{if(typeof openAddToCollectionDialog==='function')openAddToCollectionDialog(selectionPayload(),selectedPhotoCount())};
@@ -200,6 +226,7 @@ function renderLibrary(){
    title:'確認匯出照片',
    message:useBackground?`即將排入背景工作中心打包匯出 ${count} 張正式照片與中繼資料 CSV（背景執行不中斷，完成後於工作中心下載），確定匯出？`:`即將打包匯出實際已選取的 ${count} 張正式照片與中繼資料 CSV，確定匯出？`,
    confirmLabel:`匯出 ${count} 張`,
+   selectionBound:true,
    onConfirm:async()=>{
     if(useBackground){
      const r=await api('jobs/create',{kind:'export',...payloadData});
@@ -215,6 +242,7 @@ function renderLibrary(){
  };
  drawLibraryTagChips();
  setLibraryPhotoSize(ls.size, false);
+ if(ls.filterOptionsScope!==currentFilterOptionsScopeKey()){ls.filterOptions=null;ls.filterOptionsError=''}
  drawLibraryFieldFilters();
  if(ls.mode==='map')initializeLibraryMap();
  if(typeof loadSavedSearchesPanel==='function')loadSavedSearchesPanel();
@@ -222,17 +250,59 @@ function renderLibrary(){
  scheduleLibrarySearch(0,true);
 }
 function drawLibraryFieldFilters(){
- const definitions=libraryFieldDefinitions();if(!definitions.length){$('#custom-field-filters').innerHTML='<p class="muted">請只勾選一個資料集，顯示其目前與歷史表單欄位。</p>';return}
- $('#custom-field-filters').innerHTML=definitions.map((f,index)=>{const id=f.key+'|'+f.type,r=libraryState.fields[id]||{},prefix='custom-'+index;let control='';if(['text','textarea'].includes(f.type))control=`<input id="${prefix}" data-custom-id="${esc(id)}" data-custom-part="value" value="${esc(r.value||'')}" placeholder="包含文字">`;else if(['integer','number','date'].includes(f.type))control=`<div class="custom-range"><input aria-label="${esc(f.label)} 起值" type="${f.type==='date'?'date':'number'}" step="${f.type==='integer'?'1':'any'}" data-custom-id="${esc(id)}" data-custom-part="min" value="${esc(r.min??'')}" placeholder="最小值"><span>至</span><input aria-label="${esc(f.label)} 迄值" type="${f.type==='date'?'date':'number'}" step="${f.type==='integer'?'1':'any'}" data-custom-id="${esc(id)}" data-custom-part="max" value="${esc(r.max??'')}" placeholder="最大值"></div>`;else if(f.type==='boolean')control=`<select id="${prefix}" data-custom-id="${esc(id)}" data-custom-part="value"><option value="">全部</option><option value="true" ${r.value==='true'?'selected':''}>是</option><option value="false" ${r.value==='false'?'selected':''}>否</option></select>`;else control=`<div class="custom-options">${(f.options||[]).map(value=>`<button class="tag-chip ${r.values?.includes(value)?'is-selected':''}" data-custom-choice="${esc(id)}" data-choice="${esc(value)}" aria-pressed="${!!r.values?.includes(value)}">${esc(value)}</button>`).join('')}</div>`;return `<div class="custom-filter"><label for="${prefix}">${esc(f.label)} ${f.historical?'<small>歷史欄位</small>':''}</label>${control}<label class="check small"><input type="checkbox" data-custom-missing="${esc(id)}" ${r.missing?'checked':''}>只看未填／無此欄位</label></div>`}).join('');
+ const errHtml=libraryState.filterOptionsError?`<div class="metadata-warning" style="margin-bottom:8px">${esc(libraryState.filterOptionsError)} <button type="button" id="retry-filter-options">重試載入選項</button></div>`:'';
+ const definitions=libraryFieldDefinitions();if(!definitions.length){$('#custom-field-filters').innerHTML=errHtml+'<p class="muted">請只勾選一個資料集，顯示其目前與歷史表單欄位。</p>';if($('#retry-filter-options'))$('#retry-filter-options').onclick=()=>refreshLibraryFilterOptions();return}
+ $('#custom-field-filters').innerHTML=errHtml+definitions.map((f,index)=>{const id=f.key+'|'+f.type,r=libraryState.fields[id]||{},prefix='custom-'+index;let control='';if(['text','textarea'].includes(f.type))control=`<input id="${prefix}" data-custom-id="${esc(id)}" data-custom-part="value" value="${esc(r.value||'')}" placeholder="包含文字">`;else if(['integer','number','date'].includes(f.type))control=`<div class="custom-range"><input aria-label="${esc(f.label)} 起值" type="${f.type==='date'?'date':'number'}" step="${f.type==='integer'?'1':'any'}" data-custom-id="${esc(id)}" data-custom-part="min" value="${esc(r.min??'')}" placeholder="最小值"><span>至</span><input aria-label="${esc(f.label)} 迄值" type="${f.type==='date'?'date':'number'}" step="${f.type==='integer'?'1':'any'}" data-custom-id="${esc(id)}" data-custom-part="max" value="${esc(r.max??'')}" placeholder="最大值"></div>`;else if(f.type==='boolean')control=`<select id="${prefix}" data-custom-id="${esc(id)}" data-custom-part="value"><option value="">全部</option><option value="true" ${r.value==='true'?'selected':''}>是</option><option value="false" ${r.value==='false'?'selected':''}>否</option></select>`;else control=`<div class="custom-options">${(f.options||[]).map(value=>`<button class="tag-chip ${r.values?.includes(value)?'is-selected':''}" data-custom-choice="${esc(id)}" data-choice="${esc(value)}" aria-pressed="${!!r.values?.includes(value)}">${esc(value)}</button>`).join('')}</div>`;return `<div class="custom-filter"><label for="${prefix}">${esc(f.label)} ${f.historical?'<small>歷史欄位</small>':''}</label>${control}<label class="check small"><input type="checkbox" data-custom-missing="${esc(id)}" ${r.missing?'checked':''}>只看未填／無此欄位</label></div>`}).join('');
+ if($('#retry-filter-options'))$('#retry-filter-options').onclick=()=>refreshLibraryFilterOptions();
  document.querySelectorAll('[data-custom-id]').forEach(input=>input.oninput=()=>{const id=input.dataset.customId;libraryState.fields[id]={...libraryState.fields[id],[input.dataset.customPart]:input.value,missing:false};document.querySelectorAll('[data-custom-missing]').forEach(x=>{if(x.dataset.customMissing===id)x.checked=false});scheduleLibrarySearch()});
  document.querySelectorAll('[data-custom-choice]').forEach(b=>b.onclick=()=>{const id=b.dataset.customChoice,r=libraryState.fields[id]||{},values=r.values||[];libraryState.fields[id]={...r,values:values.includes(b.dataset.choice)?values.filter(x=>x!==b.dataset.choice):[...values,b.dataset.choice],missing:false};drawLibraryFieldFilters();scheduleLibrarySearch(0)});
  document.querySelectorAll('[data-custom-missing]').forEach(input=>input.onchange=()=>{const id=input.dataset.customMissing;libraryState.fields[id]={...libraryState.fields[id],missing:input.checked};scheduleLibrarySearch(0)});
 }
-function currentCriteriaKey(){return JSON.stringify({deps:filter.deps,datasets:filter.datasets,tags:selectedTags(),text:filter.text,from:filter.from,to:filter.to,star:filter.star,status:filter.status,anomaly:libraryState.anomaly,county:filter.county,town:filter.town,village:filter.village,fields:libraryRules(),pinned:libraryState.pinnedIds||null})}
+function normalizeBoundsKey(b){
+ if(!b)return null;
+ return {north:+Number(b.north).toFixed(6),south:+Number(b.south).toFixed(6),east:+Number(b.east).toFixed(6),west:+Number(b.west).toFixed(6)};
+}
+function baseCriteriaKey(){
+ const ls=libraryState;
+ return JSON.stringify({
+  deps:[...filter.deps].sort((a,b)=>a-b),
+  datasets:[...filter.datasets].sort((a,b)=>a-b),
+  tags:selectedTags().sort(),
+  text:filter.text,
+  from:filter.from,
+  to:filter.to,
+  star:!!filter.star,
+  status:filter.status,
+  anomaly:ls.anomaly,
+  county:filter.county,
+  town:filter.town,
+  village:filter.village,
+  fields:libraryRules(),
+  pinned:ls.pinnedIds?[...ls.pinnedIds].sort((a,b)=>a-b):null,
+  mode:ls.mode,
+  follow:ls.mode==='map'?!!ls.follow:false,
+ });
+}
+function currentCriteriaKey(){
+ const ls=libraryState;
+ let bounds=null,group=null;
+ if(ls.mode==='map'){
+  if(ls.group){
+   group={zoom:ls.group.zoom,bx:ls.group.bx,by:ls.group.by,grid_px:ls.group.grid_px,bounds:normalizeBoundsKey(ls.group.bounds)};
+  }else if(ls.follow&&map){
+   const b=map.getBounds();
+   bounds=normalizeBoundsKey({north:b.getNorth(),south:b.getSouth(),east:b.getEast(),west:b.getWest()});
+  }
+ }
+ return JSON.stringify({base:baseCriteriaKey(),group,bounds});
+}
 function scheduleLibrarySearch(delay=200,preservePinned=false){
  if(!preservePinned){libraryState.pinnedIds=null;libraryState.pinnedLabel=''}
+ const nextBaseKey=baseCriteriaKey();
+ if(libraryState.baseCriteriaKey&&libraryState.baseCriteriaKey!==nextBaseKey){libraryState.group=null}
  const nextKey=currentCriteriaKey();
- if(libraryState.criteriaKey&&libraryState.criteriaKey!==nextKey){clearPhotoSelection();libraryState.group=null}
+ if(libraryState.criteriaKey&&libraryState.criteriaKey!==nextKey){clearPhotoSelection()}
+ libraryState.baseCriteriaKey=nextBaseKey;
  libraryState.criteriaKey=nextKey;
  clearTimeout(libraryState.timer);
  libraryState.sequence++;
@@ -241,16 +311,19 @@ function scheduleLibrarySearch(delay=200,preservePinned=false){
  const summary=document.querySelector('[data-fold=custom]>summary');
  if(summary)summary.innerHTML='自訂表單欄位 <span class="filter-count">'+(libraryRules().length||'')+'</span>';
  if($('#cards'))$('#cards').setAttribute('aria-busy','true');
- libraryState.timer=setTimeout(()=>runLibrarySearch(sequence),delay);
+ libraryState.timer=setTimeout(()=>runLibrarySearch(sequence,nextKey),delay);
 }
-async function runLibrarySearch(sequence){
+async function runLibrarySearch(sequence,dispatchedKey){
  const ls=libraryState;
+ const expectedKey=dispatchedKey||ls.criteriaKey;
+ const expectedEpoch=selectionScopeEpoch;
  ls.loadingMore=false;ls.loadError='';
  try{
   const payload=currentLibraryCriteria(true);
   payload.limit=100;payload.offset=0;
   const result=await api('search',payload);
-  if(sequence!==ls.sequence||tab!=='library')return;
+  if(sequence!==ls.sequence||tab!=='library'||ls.criteriaKey!==expectedKey)return;
+  if(selectionAll&&(selectionAll.scopeKey!==expectedKey||selectionAll.scopeEpoch!==expectedEpoch))clearPhotoSelection();
   ls.items=result.photos||[];
   ls.ids=result.ids||[];
   ls.summary=result;
@@ -258,7 +331,6 @@ async function runLibrarySearch(sequence){
   ls.hasNext=!!result.has_next;
   ls.nextOffset=result.next_offset;
   ls.selectionToken=result.selection_token||'';
-  if(selectionAll)selectionAll.token=ls.selectionToken;
   photoCacheUpsert(ls.items);
   if($('#cards'))$('#cards').scrollTop=0;
   $('#search-error').textContent='';
@@ -315,16 +387,22 @@ async function refreshMapClusters(){
  if(!map||!libraryMarkers||libraryState.mode!=='map'||tab!=='library')return;
  const seq=++libraryState.clusterSeq;
  const b=map.getBounds();
- const payload={...currentLibraryCriteria(false),bounds:{north:b.getNorth(),south:b.getSouth(),east:b.getEast(),west:b.getWest()},zoom:map.getZoom(),grid_px:55};
+ const reqBounds={north:b.getNorth(),south:b.getSouth(),east:b.getEast(),west:b.getWest()};
+ const reqBoundsKey=JSON.stringify(normalizeBoundsKey(reqBounds));
+ const reqBaseKey=baseCriteriaKey();
+ const payload={...currentLibraryCriteria(false),bounds:reqBounds,zoom:map.getZoom(),grid_px:55};
  try{
   const res=await api('map_clusters',payload);
-  if(seq!==libraryState.clusterSeq||!map||!libraryMarkers||tab!=='library')return;
+  if(seq!==libraryState.clusterSeq||!map||!libraryMarkers||tab!=='library'||baseCriteriaKey()!==reqBaseKey)return;
+  const curB=map.getBounds();
+  const curBoundsKey=JSON.stringify(normalizeBoundsKey({north:curB.getNorth(),south:curB.getSouth(),east:curB.getEast(),west:curB.getWest()}));
+  if(curBoundsKey!==reqBoundsKey)return;
   libraryMarkers.clearLayers();
   for(const c of res.clusters||[]){
    const activeGroup=libraryState.group&&libraryState.group.bx===c.bx&&libraryState.group.by===c.by&&libraryState.group.zoom===c.zoom;
    L.marker([c.lat,c.lon],{icon:L.divIcon({html:String(c.count),className:`cluster ${activeGroup?'is-active-cluster':''}`,iconSize:[36,36]}),title:c.count===1?(c.single_photo_name||'單張照片'):`群聚 ${c.count} 張`}).addTo(libraryMarkers).on('click',()=>{
     if(c.count===1&&c.single_photo_id){openPhoto(c.single_photo_id);return}
-    libraryState.group={zoom:c.zoom,bx:c.bx,by:c.by,grid_px:c.grid_px,count:c.count};
+    libraryState.group={zoom:c.zoom,bx:c.bx,by:c.by,grid_px:c.grid_px,count:c.count,bounds:c.bounds||reqBounds,cluster_token:c.cluster_token||''};
     scheduleLibrarySearch(0,true);
     toast(`已限定此群聚 ${c.count} 張；可點「返回全部搜尋結果」`);
    });

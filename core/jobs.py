@@ -219,7 +219,22 @@ def create_job(user, kind, data):
         base_q = Photo.objects.filter(status='submitted')
         if ds_ids:
             base_q = base_q.filter(dataset_id__in=ds_ids)
-        total = base_q.count()
+        need_sem = target in ('all', 'semantic')
+        need_ocr = target in ('all', 'ocr')
+        if mode == 'rebuild':
+            total = base_q.count() * ((1 if need_sem else 0) + (1 if need_ocr else 0))
+        elif mode == 'repair':
+            sem_ready = PhotoEmbedding.objects.filter(model_key=SEMANTIC_MODEL_KEY, state='ready', source_sha=F('photo__sha')).values('photo_id')
+            ocr_ready = PhotoOcr.objects.filter(model_key=OCR_MODEL_KEY, state='ready', source_sha=F('photo__sha')).values('photo_id')
+            total = (base_q.exclude(id__in=sem_ready).count() if need_sem else 0) + (
+                base_q.exclude(id__in=ocr_ready).count() if need_ocr else 0
+            )
+        else:
+            sem_done = PhotoEmbedding.objects.filter(model_key=SEMANTIC_MODEL_KEY, source_sha=F('photo__sha')).values('photo_id')
+            ocr_done = PhotoOcr.objects.filter(model_key=OCR_MODEL_KEY, source_sha=F('photo__sha')).values('photo_id')
+            total = (base_q.exclude(id__in=sem_done).count() if need_sem else 0) + (
+                base_q.exclude(id__in=ocr_done).count() if need_ocr else 0
+            )
         job = BackgroundJob.objects.create(
             kind='semantic_index',
             actor=user,
@@ -362,15 +377,44 @@ def _mark_job_done(job, worker_id, state, *, completed_count=None, failed_count=
     job.refresh_from_db()
 
 
+def _is_complete_export(existing, actor, expected_ids):
+    """Return True only when an Export artifact covers all expected authorized photos and exists on storage."""
+    if not existing or not existing.file or not expected_ids:
+        return False
+    if len(existing.photo_ids) != len(expected_ids) or set(existing.photo_ids) != set(expected_ids):
+        return False
+    try:
+        if not existing.file.storage.exists(existing.file.name):
+            return False
+    except Exception:
+        return False
+    photos = list(visible(actor).filter(id__in=expected_ids, status='submitted').select_related('dataset__item'))
+    if len(photos) != len(expected_ids):
+        return False
+    if any(
+        not allowed(actor, p.dataset.item.department_id, 'export')
+        or not allowed(actor, p.dataset.item.department_id, 'download')
+        for p in photos
+    ):
+        return False
+    return True
+
+
 def _execute_export_job(job, worker_id):
     actor = job.actor
+    actor.refresh_from_db()
     if not actor.is_active:
         _mark_job_done(job, worker_id, 'failed', error='執行者帳號已停用')
         return
 
-    # Idempotency guard: if an Export artifact was already committed for this job, reuse it cleanly.
-    existing = Export.objects.filter(job=job).first()
-    if existing:
+    ids = job.scope.get('photo_ids', [])
+    if not ids:
+        _mark_job_done(job, worker_id, 'failed', error='匯出清單為空')
+        return
+
+    # Idempotency guard: only reuse an Export artifact when it is complete and still authorized.
+    existing = Export.objects.filter(job=job).order_by('-created').first()
+    if existing and _is_complete_export(existing, actor, ids):
         _mark_job_done(
             job,
             worker_id,
@@ -379,11 +423,6 @@ def _execute_export_job(job, worker_id):
             failed_count=0,
             result_data={'export_id': existing.id, 'url': f'/exports/{existing.id}', 'count': len(existing.photo_ids)},
         )
-        return
-
-    ids = job.scope.get('photo_ids', [])
-    if not ids:
-        _mark_job_done(job, worker_id, 'failed', error='匯出清單為空')
         return
 
     def safe_csv(value):
@@ -449,7 +488,7 @@ def _execute_export_job(job, worker_id):
                         ])
                         exported_ids.append(p.id)
                         completed += 1
-                    except OSError:
+                    except (OSError, ValueError):
                         failed += 1
                         failed_ids.append(pid)
 
@@ -463,9 +502,21 @@ def _execute_export_job(job, worker_id):
             return
 
         with transaction.atomic():
-            existing_again = Export.objects.filter(job=job).first()
-            if existing_again:
+            existing_again = Export.objects.select_for_update().filter(job=job).order_by('-created').first()
+            if existing_again and _is_complete_export(existing_again, actor, ids):
                 export_obj = existing_again
+            elif existing_again:
+                old_name = existing_again.file.name if existing_again.file else ''
+                existing_again.photo_ids = exported_ids
+                with open(tmp_path, 'rb') as fp:
+                    existing_again.file.save(f'{uuid.uuid4()}.zip', File(fp), save=True)
+                if old_name and old_name != existing_again.file.name:
+                    try:
+                        existing_again.file.storage.delete(old_name)
+                    except OSError:
+                        pass
+                export_obj = existing_again
+                audit(actor, 'export', export_obj.id, {'photos': exported_ids, 'job': str(job.id), 'rebuilt': True})
             else:
                 export_obj = Export(actor=actor, job=job, photo_ids=exported_ids)
                 with open(tmp_path, 'rb') as fp:
@@ -603,6 +654,35 @@ def _iter_pairs(items):
     return combinations(items, 2)
 
 
+def _check_job_actor_auth(job):
+    """Re-verify live actor activation and job authorization from database."""
+    actor_cls = job.actor.__class__
+    actor = actor_cls.objects.filter(id=job.actor_id).first()
+    if not actor or not actor.is_active:
+        return None, '建立者帳號已停用，工作已中止'
+
+    if job.kind == 'region_recompute':
+        if job.dataset_id:
+            ds = Dataset.objects.select_related('item').filter(id=job.dataset_id).first()
+            if not ds:
+                return actor, '目標資料集已不存在，行政區重算已中止'
+            if not manager(actor, ds.item.department_id):
+                return actor, '建立者已失去該資料集的行政區重算管理權限，工作已中止'
+        elif not actor.is_superuser:
+            return actor, '建立者已失去系統管理者資格，全系統行政區重算已中止'
+    elif job.kind == 'semantic_index':
+        if not actor.is_superuser:
+            return actor, '建立者已失去系統管理者資格，內容索引工作已中止'
+    elif job.kind == 'reconcile':
+        if not actor.is_superuser:
+            return actor, '建立者已失去系統管理者資格，檔案對帳工作已中止'
+    elif job.kind == 'similarity':
+        ds = Dataset.objects.select_related('item').filter(id=job.dataset_id).first()
+        if not ds or not allowed(actor, ds.item.department_id, 'analyze'):
+            return actor, '建立者已失去該資料集的近似分析權限，工作已中止'
+    return actor, ''
+
+
 def _execute_region_recompute_job(job, worker_id):
     cursor_id = int(job.cursor.get('last_id', 0))
     completed = int(job.cursor.get('completed', 0))
@@ -610,6 +690,13 @@ def _execute_region_recompute_job(job, worker_id):
     only_failed = bool(job.params.get('only_failed'))
     boundary_version = job.params.get('boundary_version') or None
     spec = active_boundary_spec(boundary_version)
+
+    auth_actor, auth_err = _check_job_actor_auth(job)
+    if auth_err:
+        _mark_job_done(job, worker_id, 'failed', completed_count=completed, failed_count=failed, error=auth_err)
+        if auth_actor:
+            audit(auth_actor, 'job_auth_aborted', job.id, {'kind': job.kind, 'reason': auth_err})
+        return
 
     base_q = Photo.objects.filter(lat__isnull=False, lon__isnull=False)
     if job.dataset_id:
@@ -623,6 +710,13 @@ def _execute_region_recompute_job(job, worker_id):
             return
         if chk == 'cancelled':
             _mark_job_done(job, worker_id, 'cancelled', completed_count=completed, failed_count=failed)
+            return
+
+        auth_actor, auth_err = _check_job_actor_auth(job)
+        if auth_err:
+            _mark_job_done(job, worker_id, 'failed', completed_count=completed, failed_count=failed, error=auth_err)
+            if auth_actor:
+                audit(auth_actor, 'job_auth_aborted', job.id, {'kind': job.kind, 'reason': auth_err})
             return
 
         batch = list(base_q.filter(id__gt=cursor_id).order_by('id').values('id', 'lat', 'lon')[:50])
@@ -679,17 +773,47 @@ def _execute_semantic_index_job(job, worker_id):
     target = job.params.get('target', 'all')
     mode = job.params.get('mode', 'build')
     ds_ids = job.scope.get('datasets') or []
+    scope_datasets = ds_ids if ds_ids else None
+
+    auth_actor, auth_err = _check_job_actor_auth(job)
+    if auth_err:
+        _mark_job_done(job, worker_id, 'failed', completed_count=0, failed_count=0, error=auth_err)
+        if auth_actor:
+            audit(auth_actor, 'job_auth_aborted', job.id, {'kind': job.kind, 'reason': auth_err})
+        return
+
+    need_sem = target in ('all', 'semantic')
+    need_ocr = target in ('all', 'ocr')
+    errors = []
+    sem_ready = (not need_sem) or bool(semantic_readiness())
+    ocr_ready = (not need_ocr) or bool(ocr_readiness())
+    if need_sem and not sem_ready:
+        errors.append('語意模型不可用或尚未安裝')
+    if need_ocr and not ocr_ready:
+        errors.append('OCR 模型不可用或尚未安裝')
+
+    if mode == 'rebuild' and ((need_sem and not sem_ready) and (need_ocr and not ocr_ready) or (need_sem and not need_ocr and not sem_ready) or (need_ocr and not need_sem and not ocr_ready)):
+        _mark_job_done(
+            job,
+            worker_id,
+            'failed',
+            completed_count=0,
+            failed_count=max(1, len(errors)),
+            result_data={'semantic_processed': 0, 'ocr_processed': 0},
+            error='；'.join(dict.fromkeys(errors)),
+        )
+        return
 
     if mode == 'rebuild' and not job.cursor.get('cleared'):
-        if target in ('all', 'semantic'):
+        if need_sem and sem_ready:
             q_emb = PhotoEmbedding.objects.filter(model_key=SEMANTIC_MODEL_KEY)
-            if ds_ids:
-                q_emb = q_emb.filter(photo__dataset_id__in=ds_ids)
+            if scope_datasets:
+                q_emb = q_emb.filter(photo__dataset_id__in=scope_datasets)
             q_emb.delete()
-        if target in ('all', 'ocr'):
+        if need_ocr and ocr_ready:
             q_ocr = PhotoOcr.objects.filter(model_key=OCR_MODEL_KEY)
-            if ds_ids:
-                q_ocr = q_ocr.filter(photo__dataset_id__in=ds_ids)
+            if scope_datasets:
+                q_ocr = q_ocr.filter(photo__dataset_id__in=scope_datasets)
             q_ocr.delete()
         BackgroundJob.objects.filter(id=job.id, worker_id=worker_id).update(
             cursor={'cleared': True, 'rounds': 0}, updated=timezone.now()
@@ -698,7 +822,9 @@ def _execute_semantic_index_job(job, worker_id):
     retry_failed = mode in ('repair', 'rebuild')
     total_sem = int(job.cursor.get('sem_done', 0))
     total_ocr = int(job.cursor.get('ocr_done', 0))
-    errors = []
+    scope_q = Photo.objects.filter(status='submitted')
+    if scope_datasets:
+        scope_q = scope_q.filter(dataset_id__in=scope_datasets)
 
     while True:
         chk = _renew_and_check_cancel(job, worker_id)
@@ -708,24 +834,41 @@ def _execute_semantic_index_job(job, worker_id):
             _mark_job_done(job, worker_id, 'cancelled', completed_count=total_sem + total_ocr)
             return
 
-        did_work = False
-        if target in ('all', 'semantic') and semantic_readiness():
-            try:
-                cnt = index_batch(limit=5, retry=retry_failed)
-                if cnt:
-                    total_sem += cnt
-                    did_work = True
-            except SemanticUnavailable as exc:
-                errors.append(f'語意模型不可用：{exc}')
+        auth_actor, auth_err = _check_job_actor_auth(job)
+        if auth_err:
+            _mark_job_done(job, worker_id, 'failed', completed_count=total_sem + total_ocr, failed_count=1, error=auth_err)
+            if auth_actor:
+                audit(auth_actor, 'job_auth_aborted', job.id, {'kind': job.kind, 'reason': auth_err})
+            return
 
-        if target in ('all', 'ocr') and ocr_readiness():
-            try:
-                cnt = index_ocr_batch(limit=5, retry=retry_failed)
-                if cnt:
-                    total_ocr += cnt
-                    did_work = True
-            except OcrUnavailable as exc:
-                errors.append(f'OCR 模型不可用：{exc}')
+        did_work = False
+        if need_sem and sem_ready:
+            if not semantic_readiness():
+                sem_ready = False
+                errors.append('語意模型不可用或尚未安裝')
+            else:
+                try:
+                    cnt = index_batch(limit=5, retry=retry_failed, dataset_ids=scope_datasets)
+                    if cnt:
+                        total_sem += cnt
+                        did_work = True
+                except SemanticUnavailable as exc:
+                    sem_ready = False
+                    errors.append(f'語意模型不可用：{exc}')
+
+        if need_ocr and ocr_ready:
+            if not ocr_readiness():
+                ocr_ready = False
+                errors.append('OCR 模型不可用或尚未安裝')
+            else:
+                try:
+                    cnt = index_ocr_batch(limit=5, retry=retry_failed, dataset_ids=scope_datasets)
+                    if cnt:
+                        total_ocr += cnt
+                        did_work = True
+                except OcrUnavailable as exc:
+                    ocr_ready = False
+                    errors.append(f'OCR 模型不可用：{exc}')
 
         retry_failed = False
         BackgroundJob.objects.filter(id=job.id, worker_id=worker_id).update(
@@ -736,17 +879,38 @@ def _execute_semantic_index_job(job, worker_id):
         if not did_work:
             break
 
+    model_failed = 0
+    if need_sem and sem_ready:
+        model_failed += PhotoEmbedding.objects.filter(
+            model_key=SEMANTIC_MODEL_KEY, state='failed', photo_id__in=scope_q.values('id')
+        ).count()
+    if need_ocr and ocr_ready:
+        model_failed += PhotoOcr.objects.filter(
+            model_key=OCR_MODEL_KEY, state='failed', photo_id__in=scope_q.values('id')
+        ).count()
+    if model_failed:
+        errors.append(f'共有 {model_failed} 筆索引項目處理失敗')
+
     if errors and (total_sem + total_ocr) == 0:
-        _mark_job_done(job, worker_id, 'failed', completed_count=0, failed_count=1, error='；'.join(dict.fromkeys(errors)))
+        _mark_job_done(
+            job,
+            worker_id,
+            'failed',
+            completed_count=0,
+            failed_count=max(model_failed, len(errors)),
+            result_data={'semantic_processed': total_sem, 'ocr_processed': total_ocr},
+            error='；'.join(dict.fromkeys(errors)),
+        )
         return
 
+    note = '目標範圍內均已完成索引，無待處理項目' if (not errors and (total_sem + total_ocr) == 0) else ''
     _mark_job_done(
         job,
         worker_id,
         'partial_failed' if errors else 'completed',
         completed_count=total_sem + total_ocr,
-        failed_count=len(errors),
-        result_data={'semantic_processed': total_sem, 'ocr_processed': total_ocr},
+        failed_count=max(model_failed, len(errors)) if errors else 0,
+        result_data={'semantic_processed': total_sem, 'ocr_processed': total_ocr, **({'note': note} if note else {})},
         error='；'.join(dict.fromkeys(errors)),
     )
 
@@ -794,6 +958,12 @@ def run_job(job, worker_id):
         elif job.kind == 'semantic_index':
             _execute_semantic_index_job(job, worker_id)
         elif job.kind == 'reconcile':
+            auth_actor, auth_err = _check_job_actor_auth(job)
+            if auth_err:
+                _mark_job_done(job, worker_id, 'failed', completed_count=0, failed_count=0, error=auth_err)
+                if auth_actor:
+                    audit(auth_actor, 'job_auth_aborted', job.id, {'kind': job.kind, 'reason': auth_err})
+                return
             from .reconcile import run_reconciliation
             report = run_reconciliation(
                 job.actor,
