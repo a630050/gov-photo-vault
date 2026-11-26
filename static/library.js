@@ -24,11 +24,14 @@ let libraryState={
  hasNext:false,
  nextOffset:null,
  selectionToken:'',
+ resultKey:'',
+ searchPending:true,
  loadingMore:false,
  loadError:'',
  filterOptions:null,
  filterOptionsSeq:0,
  filterOptionsScope:'',
+ fieldDefinitionsScope:'',
  filterOptionsError:'',
  pinnedIds:null,
  pinnedLabel:'',
@@ -47,9 +50,9 @@ function resetLibrary(){
  libraryState.sequence++;libraryState.clusterSeq++;
  libraryState.ids=[];libraryState.items=[];libraryState.visible=[];libraryState.view=null;libraryState.group=null;
  libraryState.fields={};libraryState.anomaly='';libraryState.summary=null;libraryState.total=0;
- libraryState.hasNext=false;libraryState.nextOffset=null;libraryState.selectionToken='';
+ libraryState.hasNext=false;libraryState.nextOffset=null;libraryState.selectionToken='';libraryState.resultKey='';libraryState.searchPending=true;
  libraryState.loadingMore=false;libraryState.loadError='';libraryState.filterOptions=null;
- libraryState.filterOptionsSeq++;libraryState.filterOptionsScope='';libraryState.filterOptionsError='';
+ libraryState.filterOptionsSeq++;libraryState.filterOptionsScope='';libraryState.fieldDefinitionsScope='';libraryState.filterOptionsError='';
  libraryState.pinnedIds=null;libraryState.pinnedLabel='';libraryState.baseCriteriaKey='';libraryState.criteriaKey='';
  filter={deps:[],items:[],datasets:[],dataset:'',tag:'',text:'',from:'',to:'',star:false,status:'submitted',county:'',town:'',village:''};
  clearPhotoSelection();
@@ -68,9 +71,11 @@ function currentFilterOptionsScopeKey(){
  });
 }
 function libraryVisiblePhotos(){return libraryState.items}
+function libraryFieldScopeKey(){return JSON.stringify({deps:[...filter.deps].sort((a,b)=>a-b),datasets:[...filter.datasets].sort((a,b)=>a-b),status:filter.status})}
+function librarySelectionReady(){return !libraryState.searchPending&&libraryState.resultKey===currentCriteriaKey()&&!!libraryState.selectionToken}
 function libraryFieldDefinitions(){
  if(filter.deps.length||filter.datasets.length!==1)return [];
- if(libraryState.filterOptionsScope===currentFilterOptionsScopeKey()&&libraryState.filterOptions?.fields?.length)return libraryState.filterOptions.fields;
+ if(libraryState.fieldDefinitionsScope===libraryFieldScopeKey()&&Array.isArray(libraryState.filterOptions?.fields))return libraryState.filterOptions.fields;
  const dataset=ds(filter.datasets[0]);if(!dataset)return [];
  return (item(dataset.item_id)?.fields||[]).map(f=>({...f,type:f.type||'text',historical:false}));
 }
@@ -115,12 +120,14 @@ async function fetchMatchedBurstGroup(burstGroup){
 async function refreshLibraryFilterOptions(){
  const optSeq=++libraryState.filterOptionsSeq;
  const optScope=currentFilterOptionsScopeKey();
+ const fieldScope=libraryFieldScopeKey();
  libraryState.filterOptionsError='';
  try{
   const opts=await api('filter_options',{departments:filter.deps,datasets:filter.datasets,status:filter.status,county:filter.county,town:filter.town});
   if(optSeq!==libraryState.filterOptionsSeq||currentFilterOptionsScopeKey()!==optScope||tab!=='library')return;
   libraryState.filterOptions=opts;
   libraryState.filterOptionsScope=optScope;
+  libraryState.fieldDefinitionsScope=fieldScope;
   libraryState.filterOptionsError='';
   drawLibraryRegionControls();
   drawLibraryTagChips();
@@ -199,6 +206,7 @@ function renderLibrary(){
  $('#fit-results').onclick=fitLibraryResults;
  $('#reset-cluster').onclick=()=>{ls.group=null;scheduleLibrarySearch(0,true)};
  $('#selectall').onclick=()=>{
+  if(!librarySelectionReady())return toast('搜尋尚未完成，請稍後再選取');
   if(!ls.total||!ls.selectionToken)return toast('目前沒有可選取的搜尋結果');
   clearPhotoSelection();
   selectionAll={token:ls.selectionToken,total:ls.total,excluded:new Set(),scopeKey:ls.criteriaKey,scopeEpoch:selectionScopeEpoch};
@@ -242,7 +250,7 @@ function renderLibrary(){
  };
  drawLibraryTagChips();
  setLibraryPhotoSize(ls.size, false);
- if(ls.filterOptionsScope!==currentFilterOptionsScopeKey()){ls.filterOptions=null;ls.filterOptionsError=''}
+ if(ls.fieldDefinitionsScope!==libraryFieldScopeKey()){ls.filterOptions=null;ls.filterOptionsError=''}
  drawLibraryFieldFilters();
  if(ls.mode==='map')initializeLibraryMap();
  if(typeof loadSavedSearchesPanel==='function')loadSavedSearchesPanel();
@@ -296,14 +304,17 @@ function currentCriteriaKey(){
  }
  return JSON.stringify({base:baseCriteriaKey(),group,bounds});
 }
+function invalidateLibraryClusters(){libraryState.clusterSeq++;if(libraryMarkers)libraryMarkers.clearLayers()}
 function scheduleLibrarySearch(delay=200,preservePinned=false){
  if(!preservePinned){libraryState.pinnedIds=null;libraryState.pinnedLabel=''}
  const nextBaseKey=baseCriteriaKey();
  if(libraryState.baseCriteriaKey&&libraryState.baseCriteriaKey!==nextBaseKey){libraryState.group=null}
  const nextKey=currentCriteriaKey();
- if(libraryState.criteriaKey&&libraryState.criteriaKey!==nextKey){clearPhotoSelection()}
+ if(libraryState.criteriaKey&&libraryState.criteriaKey!==nextKey){clearPhotoSelection();invalidateLibraryClusters()}
  libraryState.baseCriteriaKey=nextBaseKey;
  libraryState.criteriaKey=nextKey;
+ libraryState.searchPending=true;libraryState.selectionToken='';libraryState.resultKey='';
+ if($('#selectall'))$('#selectall').disabled=true;
  clearTimeout(libraryState.timer);
  libraryState.sequence++;
  const sequence=libraryState.sequence;
@@ -319,6 +330,8 @@ async function runLibrarySearch(sequence,dispatchedKey){
  const expectedEpoch=selectionScopeEpoch;
  ls.loadingMore=false;ls.loadError='';
  try{
+  const definitions=new Set(libraryFieldDefinitions().map(f=>f.key+'|'+f.type));
+  if(Object.keys(ls.fields).some(key=>!definitions.has(key)))throw Error('篩選欄位尚未載入或已失效，請重試載入選項後再搜尋');
   const payload=currentLibraryCriteria(true);
   payload.limit=100;payload.offset=0;
   const result=await api('search',payload);
@@ -330,7 +343,8 @@ async function runLibrarySearch(sequence,dispatchedKey){
   ls.total=result.total||0;
   ls.hasNext=!!result.has_next;
   ls.nextOffset=result.next_offset;
-  ls.selectionToken=result.selection_token||'';
+  ls.selectionToken=result.selection_token||'';ls.resultKey=expectedKey;ls.searchPending=false;
+  if($('#selectall'))$('#selectall').disabled=false;
   photoCacheUpsert(ls.items);
   if($('#cards'))$('#cards').scrollTop=0;
   $('#search-error').textContent='';
@@ -350,7 +364,7 @@ async function runLibrarySearch(sequence,dispatchedKey){
 }
 async function loadNextLibraryPage(){
  const ls=libraryState,seq=ls.sequence;
- if(ls.loadingMore||!ls.hasNext||ls.nextOffset==null)return;
+ if(ls.searchPending||ls.loadingMore||!ls.hasNext||ls.nextOffset==null)return;
  ls.loadingMore=true;ls.loadError='';drawLibraryResults(false);
  try{
   const payload=currentLibraryCriteria(true);
@@ -379,13 +393,15 @@ function initializeLibraryMap(){
  attachBaseMaps(map);libraryMarkers=L.layerGroup().addTo(map);
  map.on('moveend',()=>{
   libraryState.view={center:map.getCenter(),zoom:map.getZoom()};
-  refreshMapClusters();
-  if(libraryState.follow&&!libraryState.group)scheduleLibrarySearch(150,true);
+  invalidateLibraryClusters();
+  if(libraryState.follow&&!libraryState.group)scheduleLibrarySearch(150,true);else refreshMapClusters();
  });
 }
 async function refreshMapClusters(){
  if(!map||!libraryMarkers||libraryState.mode!=='map'||tab!=='library')return;
  const seq=++libraryState.clusterSeq;
+ libraryMarkers.clearLayers();
+ const queryKey=baseCriteriaKey();
  const b=map.getBounds();
  const reqBounds={north:b.getNorth(),south:b.getSouth(),east:b.getEast(),west:b.getWest()};
  const reqBoundsKey=JSON.stringify(normalizeBoundsKey(reqBounds));
@@ -401,6 +417,7 @@ async function refreshMapClusters(){
   for(const c of res.clusters||[]){
    const activeGroup=libraryState.group&&libraryState.group.bx===c.bx&&libraryState.group.by===c.by&&libraryState.group.zoom===c.zoom;
    L.marker([c.lat,c.lon],{icon:L.divIcon({html:String(c.count),className:`cluster ${activeGroup?'is-active-cluster':''}`,iconSize:[36,36]}),title:c.count===1?(c.single_photo_name||'單張照片'):`群聚 ${c.count} 張`}).addTo(libraryMarkers).on('click',()=>{
+    if(seq!==libraryState.clusterSeq||queryKey!==baseCriteriaKey())return;
     if(c.count===1&&c.single_photo_id){openPhoto(c.single_photo_id);return}
     libraryState.group={zoom:c.zoom,bx:c.bx,by:c.by,grid_px:c.grid_px,count:c.count,bounds:c.bounds||reqBounds,cluster_token:c.cluster_token||''};
     scheduleLibrarySearch(0,true);

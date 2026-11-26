@@ -22,7 +22,7 @@ function library(){renderLibrary()}
 let selectionAll=null,selectionScopeEpoch=0;
 function isPhotoSelected(id){return selectionAll?!selectionAll.excluded.has(id):selected.has(id)}
 function selectedPhotoCount(){return selectionAll?Math.max(0,selectionAll.total-selectionAll.excluded.size):selected.size}
-function setPhotoSelected(id,checked){if(selectionAll){if(checked)selectionAll.excluded.delete(id);else selectionAll.excluded.add(id)}else{if(checked)selected.add(id);else selected.delete(id)}}
+function setPhotoSelected(id,checked){if(tab==='library'&&!librarySelectionReady())return;if(selectionAll){if(checked)selectionAll.excluded.delete(id);else selectionAll.excluded.add(id)}else{if(checked)selected.add(id);else selected.delete(id)}}
 function clearPhotoSelection(reason=''){
  const hadSelection=selected.size>0||!!selectionAll;
  const openBatchDialogs=[...document.querySelectorAll('.ux-dialog-backdrop[data-selection-dialog]')];

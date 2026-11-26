@@ -1,5 +1,6 @@
 const uploadWorkspace={department:null,dataset:null,active:null,selected:new Set(),edits:new Map(),messages:[],busy:false,rows:[],total:0,hasNext:false,nextOffset:null,loadedDataset:null,loading:false,loadingMore:false,loadError:'',loadSeq:0};
 function resetUpload(){uploadWorkspace.department=null;uploadWorkspace.dataset=null;uploadWorkspace.active=null;uploadWorkspace.selected.clear();uploadWorkspace.edits.clear();uploadWorkspace.messages=[];uploadWorkspace.rows=[];uploadWorkspace.total=0;uploadWorkspace.hasNext=false;uploadWorkspace.nextOffset=null;uploadWorkspace.loadedDataset=null;uploadWorkspace.loading=false;uploadWorkspace.loadingMore=false;uploadWorkspace.loadError='';uploadWorkspace.loadSeq++}
+function invalidateUploadLoad(){uploadWorkspace.loadSeq++;uploadWorkspace.loading=false;uploadWorkspace.loadingMore=false}
 function uploadPhoto(p){return uploadWorkspace.edits.get(p.id)||{...p,attrs:structuredClone(p.attrs)}}
 function uploadRows(){return (uploadWorkspace.rows||[]).filter(p=>p.dataset===uploadWorkspace.dataset&&p.status==='draft'&&(p.uploader===state.user.name||p.can_manage))}
 async function loadUploadDrafts(dsId,opts={}){
@@ -65,7 +66,7 @@ function renderUpload(){
  const w=uploadWorkspace,departments=state.departments.filter(d=>state.user.admin||(state.user.writable||[]).includes(d.id));
  if(!departments.some(d=>d.id===w.department))w.department=departments[0]?.id||null;
  const datasets=state.datasets.filter(d=>item(d.item_id)?.department_id===w.department&&!d.archived&&item(d.item_id)?.active);
- if(!datasets.some(d=>d.id===w.dataset)){w.dataset=datasets[0]?.id||null;w.active=null;w.selected.clear()}
+ if(!datasets.some(d=>d.id===w.dataset)){invalidateUploadLoad();w.dataset=datasets[0]?.id||null;w.active=null;w.selected.clear()}
  const dataset=ds(w.dataset),template=dataset?item(dataset.item_id):null,rows=uploadRows();
  if(!rows.some(p=>p.id===w.active))w.active=rows[0]?.id||null;
  $('#side').innerHTML=`<h3>上傳與提交</h3><ol class="upload-steps"><li>選擇科室與資料集</li><li>檢查照片與填寫表單</li><li>確認後正式提交</li></ol><p class="muted">照片先保存在草稿，確認提交前不會出現在一般圖台。</p><p class="muted">缺少拍攝時間或位置仍可提交為待補資料；自訂必填欄位須完整。</p>`;
@@ -78,7 +79,7 @@ function renderUpload(){
  ${w.loadError?`<div class="metadata-warning" role="alert">草稿載入失敗：${esc(w.loadError)} <button type="button" id="upload-retry-load">重試載入</button></div>`:''}
  <div id="upload-bulk"></div><div class="upload-review-workspace"><section id="upload-photo-list" class="upload-photo-list"></section><section id="upload-photo-editor" class="card upload-photo-editor"></section></div>
  <div class="upload-submit-bar"><span id="upload-save-status" role="status">草稿可先儲存，稍後繼續。</span><button id="save-upload-selected" ${w.busy?'disabled':''}>儲存已選草稿</button><button id="review-upload-submit" class="primary" ${w.busy?'disabled':''}>檢查並確認提交</button></div>`;
- $('#upload-department').onchange=e=>{w.department=+e.target.value;w.dataset=null;w.loadedDataset=null;w.rows=[];w.total=0;w.hasNext=false;w.nextOffset=null;w.loadError='';w.loadSeq++;w.selected.clear();renderUpload()};$('#upload-dataset').onchange=e=>{w.dataset=+e.target.value;w.loadedDataset=null;w.rows=[];w.total=0;w.hasNext=false;w.nextOffset=null;w.loadError='';w.loadSeq++;w.active=null;w.selected.clear();w.messages=[];renderUpload()};
+ $('#upload-department').onchange=e=>{w.department=+e.target.value;w.dataset=null;w.loadedDataset=null;w.rows=[];w.total=0;w.hasNext=false;w.nextOffset=null;w.loadError='';invalidateUploadLoad();w.selected.clear();renderUpload()};$('#upload-dataset').onchange=e=>{w.dataset=+e.target.value;w.loadedDataset=null;w.rows=[];w.total=0;w.hasNext=false;w.nextOffset=null;w.loadError='';invalidateUploadLoad();w.active=null;w.selected.clear();w.messages=[];renderUpload()};
  $('#upload-files-form').onsubmit=e=>{e.preventDefault();action(receiveUploadFiles)};
  $('#upload-select-all').onclick=()=>{rows.forEach(p=>w.selected.add(p.id));drawUploadList();drawUploadBulk();if(w.hasNext)toast(`已選取目前已載入的 ${rows.length} 張；尚有 ${Math.max(0,w.total-rows.length)} 張未載入`)};
  if($('#upload-load-more'))$('#upload-load-more').onclick=()=>action(async()=>{await loadUploadDrafts(w.dataset,{append:true});if(tab==='upload')renderUpload()});

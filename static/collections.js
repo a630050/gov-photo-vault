@@ -43,6 +43,7 @@ async function loadSavedSearchesPanel(){
    if(preloadedOpts){
     libraryState.filterOptions=preloadedOpts;
     libraryState.filterOptionsScope=currentFilterOptionsScopeKey();
+    libraryState.fieldDefinitionsScope=libraryFieldScopeKey();
    }
    for(const rule of (c.fields||[])){
     const key=rule.key+'|'+rule.type;

@@ -659,7 +659,7 @@ def _check_job_actor_auth(job):
     actor_cls = job.actor.__class__
     actor = actor_cls.objects.filter(id=job.actor_id).first()
     if not actor or not actor.is_active:
-        return None, '建立者帳號已停用，工作已中止'
+        return actor, '建立者帳號已停用，工作已中止'
 
     if job.kind == 'region_recompute':
         if job.dataset_id:
@@ -804,20 +804,27 @@ def _execute_semantic_index_job(job, worker_id):
         )
         return
 
-    if mode == 'rebuild' and not job.cursor.get('cleared'):
-        if need_sem and sem_ready:
-            q_emb = PhotoEmbedding.objects.filter(model_key=SEMANTIC_MODEL_KEY)
-            if scope_datasets:
-                q_emb = q_emb.filter(photo__dataset_id__in=scope_datasets)
-            q_emb.delete()
-        if need_ocr and ocr_ready:
-            q_ocr = PhotoOcr.objects.filter(model_key=OCR_MODEL_KEY)
-            if scope_datasets:
-                q_ocr = q_ocr.filter(photo__dataset_id__in=scope_datasets)
-            q_ocr.delete()
-        BackgroundJob.objects.filter(id=job.id, worker_id=worker_id).update(
-            cursor={'cleared': True, 'rounds': 0}, updated=timezone.now()
-        )
+    # Keep rebuild preparation per target: a temporarily unavailable model must
+    # still clear/rebuild its own old index when this same job is retried.
+    prepared = set(job.cursor.get('cleared_targets', []))
+    if 'cleared_targets' not in job.cursor and job.cursor.get('cleared'):
+        if job.cursor.get('sem_done', 0):prepared.add('semantic')
+        if job.cursor.get('ocr_done', 0):prepared.add('ocr')
+    if mode == 'rebuild':
+        for name, needed, ready, model, key in (
+            ('semantic', need_sem, sem_ready, PhotoEmbedding, SEMANTIC_MODEL_KEY),
+            ('ocr', need_ocr, ocr_ready, PhotoOcr, OCR_MODEL_KEY),
+        ):
+            if not needed or not ready or name in prepared:
+                continue
+            with transaction.atomic():
+                records = model.objects.filter(model_key=key)
+                if scope_datasets:records = records.filter(photo__dataset_id__in=scope_datasets)
+                records.delete()
+                prepared.add(name)
+                cursor = {**job.cursor, 'cleared_targets': sorted(prepared)}
+                BackgroundJob.objects.filter(id=job.id, worker_id=worker_id).update(cursor=cursor, updated=timezone.now())
+                job.cursor = cursor
 
     retry_failed = mode in ('repair', 'rebuild')
     total_sem = int(job.cursor.get('sem_done', 0))
@@ -873,7 +880,7 @@ def _execute_semantic_index_job(job, worker_id):
         retry_failed = False
         BackgroundJob.objects.filter(id=job.id, worker_id=worker_id).update(
             completed_count=total_sem + total_ocr,
-            cursor={'cleared': True, 'sem_done': total_sem, 'ocr_done': total_ocr},
+            cursor={'cleared_targets': sorted(prepared), 'sem_done': total_sem, 'ocr_done': total_ocr},
             updated=timezone.now(),
         )
         if not did_work:
@@ -965,11 +972,17 @@ def run_job(job, worker_id):
                     audit(auth_actor, 'job_auth_aborted', job.id, {'kind': job.kind, 'reason': auth_err})
                 return
             from .reconcile import run_reconciliation
+            def check_reconcile_auth():
+                actor, reason = _check_job_actor_auth(job)
+                if reason:
+                    audit(actor, 'job_auth_aborted', job.id, {'kind': job.kind, 'reason': reason})
+                    raise Problem(reason, 403)
             report = run_reconciliation(
                 job.actor,
                 grace_hours=int(job.params.get('grace_hours', 24)),
                 verify_hashes=bool(job.params.get('verify_hashes', True)),
                 job=job,
+                checkpoint=check_reconcile_auth,
             )
             _mark_job_done(
                 job,
@@ -981,6 +994,8 @@ def run_job(job, worker_id):
             )
         else:
             _mark_job_done(job, worker_id, 'failed', error=f'不支援的工作類型：{job.kind}')
+    except Problem as exc:
+        _mark_job_done(job, worker_id, 'failed', error=exc.message)
     except Exception as exc:
         _mark_job_done(job, worker_id, 'failed', error=f'工作執行發生未預期錯誤：{exc}')
 

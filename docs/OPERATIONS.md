@@ -152,3 +152,25 @@ python ops.py worker job_worker --profile .runtime/deployment/profile.json
 
 - **行政區邊界版本**：系統管理者可於「管理後台 → 部署與維運」查看目前啟用的 `AdminBoundaryVersion` 校驗碼與來源授權，透過 `POST /api/boundary/save` 註冊新版本並依需要啟用，或排程 `region_recompute` 背景工作依指定版本重算行政區（重算期間若照片座標被更正，舊工作結果不會覆寫新座標）。
 - **檔案對帳與容量**：`reconcile/run`（或工作中心 `kind='reconcile'`）預設為**只產報告、不刪除任何檔案**的唯讀對帳，並套用寬限期排除進行中上傳／暫存與執行中背景工作。縮圖修復（`reconcile/repair_previews`）只重算缺漏縮圖，不變動原圖與孤立檔；孤立檔清理須透過 `reconcile/confirm_orphan_cleanup` 由管理者填寫理由並二次核對資料庫引用與寬限期後執行。
+
+
+## 2026-11-26 修正後的驗證與清理限制
+
+本次修補搜尋與選取範圍綁定、歷史欄位條件保留、草稿切換、舊群聚失效、孤立檔清理、撤權稽核與多模型重建重試。沒有資料庫結構變更，無須新增遷移。後端及 worker 須在重啟後載入修正，前端須重新整理。
+
+孤立檔報告現在保存檔案大小、奈秒修改時間、裝置／檔案識別與 SHA-256。舊報告若缺少完整識別，清理會跳過並要求重新對帳。清理採 SQLite 寫入交易協調引用更新；逐檔重新驗證後，先將物件移入 `.cleanup-hold` 再檢查引用及身分，驗證失敗會復原而不刪除。若原位置被其他檔案占用，原檔保留在 `.cleanup-hold`，回應及稽核會記錄 `retained_path`，應由維運人員核對後復原，不可直接清空該目錄。此協調針對目前單機 SQLite 版本；正式更換資料庫或多節點部署須另驗檔案寫入協調，外部程式不得繞過系統直接更改照片或資料庫。
+
+背景與同步對帳每批最多 100 個項目檢查操作者權限，產生報告前再確認；停用帳號造成的中止亦保留操作者稽核。多模型重建分別保存各模型準備狀態，支援接手舊版部分完成工作的游標。
+
+可重跑的隔離驗證：
+
+```powershell
+# 所有核心測試使用記憶體 DB 與臨時 MEDIA_ROOT；--fast 只加速測試帳號雜湊
+python -B scripts/test_isolated.py --fast
+python -B scripts/test_isolated.py --gateway --fast
+# 10 項新增後端競態／重試測試，以及 6 項前端延遲與失敗時序測試
+python -B scripts/test_isolated.py core.test_regressions --fast
+npm run test:frontend
+```
+
+本次核心 158 項、接收閘道 12 項及前端 6 項均通過。前端測試直接執行正式函式並注入延遲與失敗回應；本次瀏覽器自動化工具初始化失敗，因此未完成瀏覽器畫面操作驗證。未測試真實 NAS 斷線或多主機並行，不作已驗收宣稱。
