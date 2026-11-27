@@ -3,10 +3,11 @@ const fieldTypes=[['text','單行文字'],['textarea','多行文字'],['integer'
 function managedDepartments(){return state.departments.filter(d=>state.user.admin||state.user.managed.includes(d.id)||state.user.capabilities?.[d.id]?.forms)}
 function renderAdmin(){
  const departments=managedDepartments();
- $('#side').innerHTML=`<h3>管理後台</h3><div class="admin-nav">${[['forms','表單設計'],['datasets','資料集管理'],['accounts','帳號與設定'],['operations','部署與維運']].filter(([id])=>!['accounts','operations'].includes(id)||state.user.admin).map(([id,label])=>`<button data-admin-section="${id}" class="${adminSection===id?'primary':''}">${label}</button>`).join('')}</div><p class="muted">科室 → 資料集 → 照片<br>表單是資料集使用的欄位範本。</p>`;
+ $('#side').innerHTML=`<h3>管理後台</h3><div class="admin-nav">${[['forms','表單設計'],['datasets','資料集管理'],['accounts','帳號與設定'],['integrations','串接系統管理'],['operations','部署與維運']].filter(([id])=>!['accounts','integrations','operations'].includes(id)||state.user.admin).map(([id,label])=>`<button data-admin-section="${id}" class="${adminSection===id?'primary':''}">${label}</button>`).join('')}</div><p class="muted">科室 → 資料集 → 照片<br>表單是資料集使用的欄位範本。</p>`;
  document.querySelectorAll('[data-admin-section]').forEach(b=>b.onclick=()=>{if(formDirty&&!confirm('尚有未發布的表單修改，確定離開？'))return;formDirty=false;editor=null;adminSection=b.dataset.adminSection;renderAdmin()});
  if(!departments.length){$('#main').innerHTML='<div class="empty">目前沒有科室表單管理權限，請由主管或系統管理者操作。</div>';return}
  if(adminSection==='operations'){renderOperations();return}
+ if(adminSection==='integrations'){renderIntegrations();return}
  if(adminSection==='accounts'){renderAccounts();return}
  if(adminSection==='datasets'){renderDatasets(departments);return}
  if(!editor)editor={id:null,department:departments[0].id,name:'',version:null,active:true,fields:[]};
@@ -105,4 +106,44 @@ async function loadReconcileAdminPanel(){
   $('#reconcile-run-btn').onclick=()=>action(async()=>{await api('reconcile/run',{grace_hours:24,verify_hashes:true});toast('已完成檔案對帳報告（未變更任何檔案）');loadReconcileAdminPanel()});
   $('#reconcile-repair-btn').onclick=()=>action(async()=>{const res=await api('reconcile/repair_previews',{});toast(`縮圖修復完成：成功 ${res.repaired} 張，失敗 ${res.failed} 張`);loadReconcileAdminPanel()});
  }catch{}
+}
+
+async function renderIntegrations(){
+ $('#main').innerHTML='<h1>串接系統管理</h1><p role="status">載入串接系統設定中…</p>';
+ try{
+  const data=await api('integration_admin/list',{});
+  if(tab!=='admin'||adminSection!=='integrations')return;
+  const capsList=[['search','一般搜尋'],['nearby','附近搜尋'],['ocr_search','OCR 搜尋'],['semantic_search','內容搜尋'],['thumbnail','縮圖'],['report_import','報告取圖'],['original_download','原圖下載'],['mcp','MCP 工具'],['picker','照片挑選器']];
+  $('#main').innerHTML=`<div class="toolbar"><div><h1>串接系統管理（API / MCP / 挑選器）</h1><p class="muted">雙層授權：串接系統範圍 ∩ 操作人員權限。變更均保留理由與前後紀錄。</p></div><a class="button" href="/integration-demo" target="_blank" rel="noopener">開啟防災整合示範工作台</a></div>
+  <section class="card"><h3>新增串接系統</h3><form id="int-create-form"><div class="row"><input name="code" required placeholder="系統識別碼（如 disaster-response）"><input name="name" required placeholder="系統名稱（如 防災系統）"><input name="owner_unit" placeholder="負責單位"><input name="contact" placeholder="聯絡資訊"></div>
+  <div style="margin:8px 0"><strong>授權資料集（明確指定，不隨科室自動擴大）：</strong><div class="row" style="flex-wrap:wrap">${state.datasets.map(d=>`<label class="check"><input type="checkbox" name="ds" value="${d.id}">${esc(d.name)}</label>`).join('')}</div></div>
+  <div style="margin:8px 0"><strong>功能權限：</strong><div class="row" style="flex-wrap:wrap">${capsList.map(([k,l])=>`<label class="check"><input type="checkbox" name="cap_${k}" ${k!=='original_download'?'checked':''}>${l}</label>`).join('')}</div></div>
+  <div class="row"><input name="allowed_origins" value="${esc(window.location.origin)}" placeholder="允許來源網域（逗號分隔）"><input name="max_results_per_page" type="number" value="50" min="1" max="200" title="每頁上限"><input name="max_import_count" type="number" value="50" min="1" max="200" title="匯入上限"><input name="reason" required placeholder="建立理由（必填）"></div>
+  <button class="primary" style="margin-top:8px">建立串接系統</button></form><div id="int-secret-out" style="margin-top:8px"></div></section>
+  <section class="card"><h3>已註冊串接系統</h3><table class="table"><thead><tr><th>識別碼／名稱</th><th>狀態</th><th>授權資料集</th><th>上限</th><th>操作</th></tr></thead><tbody>${(data.systems||[]).map(s=>`<tr><td><strong>${esc(s.code)}</strong><br>${esc(s.name)}</td><td>${s.revoked?'<span class="badge warn">已撤銷</span>':(s.active?'<span class="badge">啟用中</span>':'停用')}</td><td>${(s.allowed_datasets||[]).map(id=>esc(ds(id)?.name||('#'+id))).join('、')||'無'}</td><td>每頁 ${s.max_results_per_page}／匯入 ${s.max_import_count}／${s.rate_limit_per_minute} 次/分</td><td>${s.revoked?'':`<button type="button" class="danger" data-revoke-sys="${esc(s.id)}">撤銷授權</button>`}</td></tr>`).join('')||'<tr><td colspan="5">尚無串接系統</td></tr>'}</tbody></table></section>
+  <section class="card"><h3>核發人員存取憑證（本機測試／整合驗證）</h3><form id="int-token-form" class="row"><select name="system_id">${(data.systems||[]).filter(s=>!s.revoked).map(s=>`<option value="${esc(s.id)}">${esc(s.code)} (${esc(s.name)})</option>`).join('')}</select><select name="user_id">${state.users.map(u=>`<option value="${u.id}">${esc(u.username)}</option>`).join('')}</select><select name="audience"><option value="integration-api">integration-api (API + MCP + 挑選器)</option><option value="mcp">mcp (僅 MCP)</option></select><input name="ttl_minutes" type="number" value="60" min="5" max="1440" style="width:90px"><button class="primary">核發憑證</button></form><div id="int-token-out" style="margin-top:8px"></div>
+  <h4 style="margin-top:14px">已核發憑證</h4><table class="table"><thead><tr><th>系統</th><th>操作人員</th><th>對象</th><th>到期</th><th>狀態</th><th>操作</th></tr></thead><tbody>${(data.tokens||[]).map(t=>`<tr><td>${esc(t.system_code)}</td><td>${esc(t.username)} (${esc(t.actor_type)})</td><td>${esc(t.audience)}</td><td>${esc(t.expires_at)}</td><td>${t.revoked?'已撤銷':'有效'}</td><td>${t.revoked?'':`<button type="button" data-revoke-tok="${esc(t.id)}">撤銷</button>`}</td></tr>`).join('')||'<tr><td colspan="6">尚無憑證</td></tr>'}</tbody></table></section>
+  <details class="card"><summary>最近整合稽核紀錄（${(data.audits||[]).length} 筆）</summary><table class="table"><thead><tr><th>時間</th><th>系統／人員</th><th>通道</th><th>動作</th><th>結果</th><th>案件／報告</th></tr></thead><tbody>${(data.audits||[]).map(a=>`<tr><td>${esc(a.created)}</td><td>${esc(a.system_code)} / ${esc(a.username)}</td><td>${esc(a.channel)}</td><td>${esc(a.action)}</td><td>${esc(a.outcome)} ${esc(a.error_code)}</td><td>${esc(a.case_id)} ${esc(a.report_id)}</td></tr>`).join('')}</tbody></table></details>`;
+
+  $('#int-create-form').onsubmit=e=>{e.preventDefault();action(async()=>{
+   const f=e.target,fd=new FormData(f);
+   const allowed_datasets=[...f.querySelectorAll('input[name="ds"]:checked')].map(c=>+c.value);
+   const capabilities={};capsList.forEach(([k])=>{capabilities[k]=Boolean(f.querySelector(`input[name="cap_${k}"]`)?.checked)});
+   const origins=String(fd.get('allowed_origins')||'').split(',').map(x=>x.trim()).filter(Boolean);
+   const res=await api('integration_admin/save_system',{code:fd.get('code'),name:fd.get('name'),owner_unit:fd.get('owner_unit'),contact:fd.get('contact'),allowed_datasets,capabilities,allowed_origins:origins,max_results_per_page:+fd.get('max_results_per_page'),max_import_count:+fd.get('max_import_count'),reason:fd.get('reason')});
+   toast('串接系統已建立');
+   await renderIntegrations();
+   if(res.client_secret&&$('#int-secret-out'))$('#int-secret-out').innerHTML=`<div class="card" style="background:#fef3c7"><strong>系統密鑰（僅顯示一次，請妥善由業務系統後端保管）：</strong><code>${esc(res.client_secret)}</code></div>`;
+  })};
+  $('#int-token-form').onsubmit=e=>{e.preventDefault();action(async()=>{
+   const fd=new FormData(e.target);
+   if(!fd.get('system_id')){toast('請先建立啟用中的串接系統');return}
+   const res=await api('integration_admin/issue_token',{system_id:fd.get('system_id'),user_id:+fd.get('user_id'),audience:fd.get('audience'),ttl_minutes:+fd.get('ttl_minutes')});
+   toast('已核發存取憑證');
+   await renderIntegrations();
+   if($('#int-token-out'))$('#int-token-out').innerHTML=`<div class="card" style="background:#e0f2fe"><strong>存取憑證（僅顯示一次）：</strong><code style="word-break:break-all">${esc(res.access_token)}</code></div>`;
+  })};
+  document.querySelectorAll('[data-revoke-sys]').forEach(b=>b.onclick=()=>{const reason=prompt('請輸入撤銷此串接系統授權的理由：');if(!reason||!reason.trim())return;action(async()=>{await api('integration_admin/revoke_system',{id:b.dataset.revokeSys,reason:reason.trim()});toast('已撤銷串接系統與所有憑證');renderIntegrations()})});
+  document.querySelectorAll('[data-revoke-tok]').forEach(b=>b.onclick=()=>action(async()=>{await api('integration_admin/revoke_token',{id:b.dataset.revokeTok});toast('已撤銷憑證');renderIntegrations()}));
+ }catch(error){$('#main').innerHTML=`<h1>串接系統管理</h1><div class="card">${esc(error.message)}</div>`}
 }

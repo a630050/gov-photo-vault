@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="csrf-cookie" content="{{ csrf_cookie_name }}">
+  <title>防災系統跨業務整合示範（AI 搜尋回圖 ＋ 勘災報告選圖匯入）</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <style>
+    body { margin: 0; font-family: "Microsoft JhengHei", system-ui, sans-serif; background: #f1f5f9; color: #0f172a; }
+    .dm-head { background: #1e3a5f; color: #fff; padding: 14px 20px; display: flex; justify-content: space-between; align-items: center; }
+    .dm-body { max-width: 1280px; margin: 16px auto; padding: 0 16px; display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+    .dm-panel { background: #fff; border: 1px solid #cbd5e1; border-radius: 8px; padding: 16px; display: flex; flex-direction: column; gap: 12px; }
+    .dm-row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+    .dm-row input, .dm-row select { padding: 6px 8px; border: 1px solid #cbd5e1; border-radius: 4px; font-size: 13px; }
+    .dm-btn { padding: 6px 12px; border: 1px solid #cbd5e1; border-radius: 5px; background: #fff; cursor: pointer; font-size: 13px; }
+    .dm-btn.primary { background: #2563eb; color: #fff; border-color: #2563eb; }
+    .dm-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 10px; }
+    .dm-card { border: 1px solid #cbd5e1; border-radius: 6px; overflow: hidden; background: #f8fafc; font-size: 12px; }
+    .dm-card img { width: 100%; aspect-ratio: 4/3; object-fit: cover; background: #e2e8f0; }
+    .dm-card-body { padding: 8px; display: flex; flex-direction: column; gap: 4px; }
+    .dm-log { background: #0f172a; color: #e2e8f0; padding: 10px; border-radius: 6px; font-family: monospace; font-size: 12px; max-height: 180px; overflow-y: auto; white-space: pre-wrap; }
+    .dm-iframe-bg { position: fixed; inset: 0; background: rgba(15,23,42,.65); display: flex; align-items: center; justify-content: center; z-index: 1000; }
+    .dm-iframe-box { background: #fff; width: 94vw; height: 90vh; border-radius: 10px; overflow: hidden; display: flex; flex-direction: column; }
+    .dm-iframe-box iframe { flex: 1; border: 0; width: 100%; }
+  </style>
+</head>
+<body>
+  <div class="dm-head">
+    <div><strong>防災系統跨業務整合示範工作台</strong>（第一階段端到端驗證）</div>
+    <div><a href="/" style="color:#bae6fd">返回照片歸檔系統</a></div>
+  </div>
+  <div style="max-width:1280px;margin:12px auto 0;padding:0 16px">
+    <div class="dm-panel">
+      <div class="dm-row">
+        <label><strong>Bearer 存取憑證：</strong></label>
+        <input id="dm-token" type="password" placeholder="貼上由後台核發或 OAuth 取得的存取憑證" style="flex:1;min-width:260px">
+        <button class="dm-btn primary" id="dm-load-caps">載入授權能力與資料集</button>
+      </div>
+      <div id="dm-caps-info" style="font-size:13px;color:#475569">尚未連線。請先於管理後台建立串接系統並核發憑證，或透過 OAuth 取得憑證。</div>
+    </div>
+  </div>
+  <div class="dm-body">
+    <div class="dm-panel">
+      <h3 style="margin:0">流程一：防災 AI 搜尋回圖（MCP `/mcp`）</h3>
+      <div class="dm-row">
+        <select id="dm-ai-mode">
+          <option value="general">一般搜尋</option>
+          <option value="nearby">附近搜尋</option>
+          <option value="ocr">OCR 文字搜尋</option>
+          <option value="semantic">中文影像內容搜尋</option>
+        </select>
+        <select id="dm-ai-ds"><option value="">請選擇資料集</option></select>
+        <input id="dm-ai-from" type="date" title="起日">
+        <input id="dm-ai-to" type="date" title="迄日">
+      </div>
+      <div class="dm-row" id="dm-nearby-row" style="display:none">
+        <input id="dm-ai-lat" type="text" placeholder="緯度（如 25.0330）" style="width:130px">
+        <input id="dm-ai-lon" type="text" placeholder="經度（如 121.5654）" style="width:130px">
+        <input id="dm-ai-rad" type="number" value="500" min="10" max="50000" placeholder="半徑（公尺）" style="width:100px">
+      </div>
+      <div class="dm-row">
+        <input id="dm-ai-query" type="text" placeholder="關鍵字 / OCR 文字 / 影像內容" style="flex:1">
+        <button class="dm-btn primary" id="dm-ai-run">透過 MCP 搜尋並回圖</button>
+      </div>
+      <div id="dm-ai-msg" style="font-size:13px;color:#0369a1"></div>
+      <div id="dm-ai-cards" class="dm-cards"></div>
+      <div>
+        <strong>報告候選清單（由 AI 卡片加入）：</strong>
+        <span id="dm-candidates">尚未加入</span>
+      </div>
+    </div>
+    <div class="dm-panel">
+      <h3 style="margin:0">流程二：勘災報告選圖匯入（照片挑選器 iframe）</h3>
+      <div class="dm-row">
+        <input id="dm-case-id" type="text" value="CASE-2026-0601" placeholder="案件編號">
+        <input id="dm-report-id" type="text" value="RPT-2026-001" placeholder="報告編號">
+        <button class="dm-btn primary" id="dm-open-picker">開啟照片挑選器</button>
+      </div>
+      <div id="dm-report-status" style="font-size:13px;color:#475569">尚未匯入報告照片。</div>
+      <div id="dm-report-items" class="dm-cards"></div>
+      <div id="dm-log" class="dm-log">等待操作…</div>
+    </div>
+  </div>
+  <div id="dm-modal-slot"></div>
+  <script src="/static/integration-demo.js"></script>
+</body>
+</html>

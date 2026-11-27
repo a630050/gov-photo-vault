@@ -121,6 +121,12 @@ def api(request, path):
         if path.startswith('reconcile/') and method == 'POST':
             from .views_reconcile import handle_reconcile_api
             return handle_reconcile_api(path, data, u)
+        if path.startswith('integration_admin/') and method == 'POST':
+            from .views_integration import handle_integration_admin_api
+            with transaction.atomic():
+                res = handle_integration_admin_api(path, data, u)
+                if res is not None:
+                    return res
         if path == 'nearby' and method == 'POST':
             try:
                 with transaction.atomic():

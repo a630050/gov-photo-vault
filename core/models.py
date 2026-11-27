@@ -370,3 +370,179 @@ class StorageReconcileReport(models.Model):
     summary = models.JSONField(default=dict)
     issues = models.JSONField(default=list)
     created = models.DateTimeField(auto_now_add=True)
+
+
+class IntegrationSystem(models.Model):
+    """Registered external business system authorized to use Integration API / MCP / Picker."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    code = models.CharField(max_length=60, unique=True)
+    name = models.CharField(max_length=120)
+    owner_unit = models.CharField(max_length=120, blank=True, default='')
+    contact = models.CharField(max_length=200, blank=True, default='')
+    allowed_datasets = models.ManyToManyField(Dataset, blank=True, related_name='integration_systems')
+    capabilities = models.JSONField(default=dict)
+    allowed_fields = models.JSONField(default=dict)
+    active = models.BooleanField(default=True, db_index=True)
+    revoked = models.BooleanField(default=False, db_index=True)
+    valid_from = models.DateTimeField(null=True, blank=True)
+    valid_until = models.DateTimeField(null=True, blank=True)
+    max_results_per_page = models.PositiveIntegerField(default=50)
+    rate_limit_per_minute = models.PositiveIntegerField(default=120)
+    max_import_count = models.PositiveIntegerField(default=50)
+    max_preview_per_call = models.PositiveIntegerField(default=12)
+    allowed_origins = models.JSONField(default=list)
+    client_secret_sha = models.CharField(max_length=64, blank=True, default='')
+    service_user = models.ForeignKey(User, null=True, blank=True, on_delete=models.PROTECT, related_name='integration_service_systems')
+    allow_service_token = models.BooleanField(default=False)
+    created = models.DateTimeField(auto_now_add=True)
+    updated = models.DateTimeField(auto_now=True)
+
+
+class IntegrationSystemEvent(models.Model):
+    """Change history for IntegrationSystem configurations and revocations."""
+
+    system = models.ForeignKey(IntegrationSystem, on_delete=models.PROTECT, related_name='events')
+    actor = models.ForeignKey(User, null=True, blank=True, on_delete=models.PROTECT)
+    action = models.CharField(max_length=40)
+    reason = models.TextField(blank=True, default='')
+    before = models.JSONField(default=dict)
+    after = models.JSONField(default=dict)
+    created = models.DateTimeField(auto_now_add=True)
+
+
+class ExternalIdentityBinding(models.Model):
+    """Verified mapping from external (issuer, subject) to local archive User."""
+
+    system = models.ForeignKey(IntegrationSystem, on_delete=models.PROTECT, related_name='identity_bindings')
+    issuer = models.CharField(max_length=255)
+    subject = models.CharField(max_length=255)
+    user = models.ForeignKey(User, on_delete=models.PROTECT, related_name='external_identity_bindings')
+    active = models.BooleanField(default=True, db_index=True)
+    verified_by = models.ForeignKey(User, null=True, blank=True, on_delete=models.PROTECT, related_name='+')
+    verified_at = models.DateTimeField(default=timezone.now)
+    created = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = [('system', 'issuer', 'subject')]
+
+
+class IntegrationToken(models.Model):
+    """OAuth/OIDC-compatible bearer access token bound to system, actor, audience, and scopes."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    system = models.ForeignKey(IntegrationSystem, on_delete=models.PROTECT, related_name='tokens')
+    user = models.ForeignKey(User, on_delete=models.PROTECT, related_name='integration_tokens')
+    actor_type = models.CharField(max_length=20, default='user')
+    token_sha = models.CharField(max_length=64, unique=True, db_index=True)
+    audience = models.CharField(max_length=60, default='integration-api')
+    scopes = models.JSONField(default=list)
+    expires_at = models.DateTimeField(db_index=True)
+    revoked = models.BooleanField(default=False, db_index=True)
+    created_by = models.ForeignKey(User, null=True, blank=True, on_delete=models.PROTECT, related_name='+')
+    created = models.DateTimeField(auto_now_add=True)
+
+
+class IntegrationAuthCode(models.Model):
+    """Short-lived OAuth 2.0 authorization code with PKCE support."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    code_sha = models.CharField(max_length=64, unique=True, db_index=True)
+    system = models.ForeignKey(IntegrationSystem, on_delete=models.PROTECT, related_name='auth_codes')
+    user = models.ForeignKey(User, on_delete=models.PROTECT)
+    redirect_uri = models.CharField(max_length=500)
+    audience = models.CharField(max_length=60, default='integration-api')
+    scopes = models.JSONField(default=list)
+    code_challenge = models.CharField(max_length=128, blank=True, default='')
+    code_challenge_method = models.CharField(max_length=16, blank=True, default='')
+    expires_at = models.DateTimeField()
+    used = models.BooleanField(default=False)
+    created = models.DateTimeField(auto_now_add=True)
+
+
+class PickerSession(models.Model):
+    """Short-lived session for embedded/popup reusable photo picker."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    token_sha = models.CharField(max_length=64, unique=True, db_index=True)
+    system = models.ForeignKey(IntegrationSystem, on_delete=models.PROTECT, related_name='picker_sessions')
+    user = models.ForeignKey(User, on_delete=models.PROTECT)
+    case_id = models.CharField(max_length=120, blank=True, default='')
+    report_id = models.CharField(max_length=120, blank=True, default='')
+    origin = models.CharField(max_length=300, blank=True, default='')
+    callback_url = models.CharField(max_length=500, blank=True, default='')
+    defaults_payload = models.JSONField(default=dict)
+    max_select = models.PositiveIntegerField(default=50)
+    expires_at = models.DateTimeField()
+    revoked = models.BooleanField(default=False)
+    created = models.DateTimeField(auto_now_add=True)
+
+
+class ReportImportJob(models.Model):
+    """Idempotent report photo import job with provenance tracking."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    system = models.ForeignKey(IntegrationSystem, on_delete=models.PROTECT, related_name='report_imports')
+    user = models.ForeignKey(User, on_delete=models.PROTECT, related_name='report_imports')
+    idempotency_key = models.CharField(max_length=128)
+    case_id = models.CharField(max_length=120, blank=True, default='')
+    report_id = models.CharField(max_length=120, blank=True, default='')
+    state = models.CharField(max_length=24, default='pending', db_index=True)
+    request_payload = models.JSONField(default=dict)
+    confirmed_at = models.DateTimeField(default=timezone.now)
+    created = models.DateTimeField(auto_now_add=True)
+    updated = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        unique_together = [('system', 'idempotency_key')]
+
+
+class ReportImportItem(models.Model):
+    """Per-photo record inside a ReportImportJob, including sanitized report image copy."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    job = models.ForeignKey(ReportImportJob, on_delete=models.CASCADE, related_name='items')
+    ordinal = models.PositiveIntegerField(default=0)
+    photo = models.ForeignKey(Photo, null=True, blank=True, on_delete=models.PROTECT)
+    requested_photo_id = models.PositiveIntegerField()
+    dataset_id_snapshot = models.PositiveIntegerField(null=True, blank=True)
+    dataset_name_snapshot = models.CharField(max_length=120, blank=True, default='')
+    expected_version = models.PositiveIntegerField(null=True, blank=True)
+    actual_version = models.PositiveIntegerField(null=True, blank=True)
+    source_sha = models.CharField(max_length=64, blank=True, default='')
+    variant = models.CharField(max_length=20, default='report')
+    caption = models.TextField(blank=True, default='')
+    captured_info = models.JSONField(default=dict)
+    state = models.CharField(max_length=24, default='pending')
+    error_code = models.CharField(max_length=60, blank=True, default='')
+    error_message = models.CharField(max_length=250, blank=True, default='')
+    output_file = models.FileField(upload_to='integration_reports/%Y/%m', blank=True)
+    output_sha = models.CharField(max_length=64, blank=True, default='')
+    output_size = models.PositiveBigIntegerField(default=0)
+    output_format = models.CharField(max_length=20, blank=True, default='')
+    fetched_at = models.DateTimeField(null=True, blank=True)
+    created = models.DateTimeField(auto_now_add=True)
+    updated = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['ordinal', 'created']
+
+
+class IntegrationAudit(models.Model):
+    """Structured audit trail for all Integration API, MCP, Picker, and Admin actions."""
+
+    system = models.ForeignKey(IntegrationSystem, null=True, blank=True, on_delete=models.PROTECT)
+    user = models.ForeignKey(User, null=True, blank=True, on_delete=models.PROTECT)
+    actor_type = models.CharField(max_length=20, default='user')
+    channel = models.CharField(max_length=20, default='api')
+    action = models.CharField(max_length=80, db_index=True)
+    search_id = models.CharField(max_length=64, blank=True, default='', db_index=True)
+    dataset_ids = models.JSONField(default=list)
+    photo_ids = models.JSONField(default=list)
+    case_id = models.CharField(max_length=120, blank=True, default='')
+    report_id = models.CharField(max_length=120, blank=True, default='')
+    import_job_id = models.CharField(max_length=64, blank=True, default='')
+    outcome = models.CharField(max_length=24, default='success')
+    error_code = models.CharField(max_length=60, blank=True, default='')
+    detail = models.JSONField(default=dict)
+    created = models.DateTimeField(auto_now_add=True, db_index=True)
