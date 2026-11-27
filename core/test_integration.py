@@ -1155,3 +1155,332 @@ class IntegrationPhase1AcceptanceTests(TestCase):
                 **self._auth(tok),
             )
             self.assertEqual(r.status_code, 403, f'Should reject malformed origin: {bad_origin}')
+
+    def test_openapi_spec_and_offline_docs(self):
+        """Phase 2: /integration/v1/openapi.json and offline /integration/v1/docs."""
+        r_spec = self.client.get('/integration/v1/openapi.json')
+        self.assertEqual(r_spec.status_code, 200)
+        spec = r_spec.json()
+        self.assertEqual(spec['openapi'], '3.1.0')
+        self.assertIn('/integration/v1/photos/search', spec['paths'])
+        self.assertIn('/integration/v1/report-imports', spec['paths'])
+        self.assertIn('/mcp', spec['paths'])
+        err_codes = spec['components']['schemas']['ErrorResponse']['properties']['error']['properties']['code']['enum']
+        self.assertIn('FILE_EXPIRED', err_codes)
+
+        r_post = self.client.post('/integration/v1/openapi.json')
+        self.assertEqual(r_post.status_code, 405)
+
+        r_docs = self.client.get('/integration/v1/docs')
+        self.assertEqual(r_docs.status_code, 200)
+        html = r_docs.content.decode('utf-8')
+        self.assertIn('/integration/v1/openapi.json', html)
+        self.assertNotIn('cdn.jsdelivr.net', html)
+        self.assertNotIn('unpkg.com', html)
+        self.assertEqual(self.client.post('/integration/v1/docs').status_code, 405)
+
+    def test_retention_cleanup_expires_old_reports_preserves_provenance_and_returns_410(self):
+        """Phase 2: retention cleanup removes aged physical copies, preserves hashes, and returns 410 FILE_EXPIRED."""
+        from core.integration_maintenance import integration_storage_stats, run_integration_cleanup
+        from core.models import IntegrationAuthCode, PickerSession, ReportImportJob
+
+        tok = self._issue_token(self.sys_a, self.user_a)
+        # Create an aged report import and a recent report import
+        r_old = self.client.post(
+            '/integration/v1/report-imports',
+            data=json.dumps({
+                'idempotency_key': 'idem-aged-1',
+                'case_id': 'CASE-AGED',
+                'report_id': 'REP-AGED',
+                'items': [{'photo_id': self.photo_a1.id, 'expected_version': self.photo_a1.version, 'ordinal': 1, 'caption': '舊報告圖'}],
+            }),
+            content_type='application/json',
+            **self._auth(tok),
+        )
+        self.assertEqual(r_old.status_code, 201)
+        old_data = r_old.json()
+        old_job_id = old_data['import_job_id']
+        old_ticket = old_data['items'][0]['output']['download_ticket']['ticket']
+        old_sha = old_data['items'][0]['output']['sha256']
+        old_size = old_data['items'][0]['output']['size']
+
+        r_new = self.client.post(
+            '/integration/v1/report-imports',
+            data=json.dumps({
+                'idempotency_key': 'idem-fresh-1',
+                'case_id': 'CASE-FRESH',
+                'report_id': 'REP-FRESH',
+                'items': [{'photo_id': self.photo_a2.id, 'expected_version': self.photo_a2.version, 'ordinal': 1, 'caption': '新報告圖'}],
+            }),
+            content_type='application/json',
+            **self._auth(tok),
+        )
+        self.assertEqual(r_new.status_code, 201)
+        new_job_id = r_new.json()['import_job_id']
+
+        aged_time = timezone.now() - timedelta(days=45)
+        ReportImportJob.objects.filter(id=old_job_id).update(updated=aged_time, created=aged_time)
+
+        # Create aged expired auth code, aged revoked token, aged expired picker session, and aged audit with query
+        old_code = IntegrationAuthCode.objects.create(
+            code_sha=hash_secret('old-code-1'),
+            system=self.sys_a,
+            user=self.user_a,
+            redirect_uri='https://disaster.agency.gov.tw/cb',
+            expires_at=timezone.now() - timedelta(hours=2),
+        )
+        old_tok = IntegrationToken.objects.create(
+            system=self.sys_a,
+            user=self.user_a,
+            token_sha=hash_secret('old-tok-1'),
+            expires_at=timezone.now() - timedelta(days=45),
+        )
+        old_sess = PickerSession.objects.create(
+            token_sha=hash_secret('old-sess-1'),
+            system=self.sys_a,
+            user=self.user_a,
+            origin='https://disaster.agency.gov.tw',
+            expires_at=timezone.now() - timedelta(days=45),
+        )
+        old_audit = IntegrationAudit.objects.create(
+            system=self.sys_a,
+            user=self.user_a,
+            action='search',
+            case_id='CASE-AGED',
+            photo_ids=[self.photo_a1.id],
+            detail={'query': '機密橋梁關鍵字', 'mode': 'ocr'},
+        )
+        IntegrationAudit.objects.filter(id=old_audit.id).update(created=timezone.now() - timedelta(days=200))
+
+        # Dry run must not mutate anything
+        stats_before = integration_storage_stats(report_retention_days=30, token_retention_days=30, audit_detail_days=180)
+        self.assertEqual(stats_before['cleanup_candidates']['expired_report_files'], 1)
+        self.assertGreaterEqual(stats_before['cleanup_candidates']['redactable_audits'], 1)
+
+        dry = run_integration_cleanup(report_retention_days=30, token_retention_days=30, audit_detail_days=180, dry_run=True)
+        self.assertTrue(dry['dry_run'])
+        self.assertEqual(dry['expired_report_files'], 1)
+        self.assertEqual(dry['deleted_auth_codes'], 1)
+        self.assertEqual(dry['deleted_tokens'], 1)
+        self.assertEqual(dry['deleted_picker_sessions'], 1)
+        self.assertEqual(dry['redacted_audits'], 1)
+        self.assertEqual(ReportImportItem.objects.get(job_id=old_job_id).state, 'ready')
+
+        # Execute cleanup
+        res = run_integration_cleanup(report_retention_days=30, token_retention_days=30, audit_detail_days=180, dry_run=False)
+        self.assertFalse(res['dry_run'])
+        self.assertEqual(res['expired_report_files'], 1)
+        self.assertGreater(res['freed_bytes'], 0)
+        self.assertFalse(IntegrationAuthCode.objects.filter(id=old_code.id).exists())
+        self.assertFalse(IntegrationToken.objects.filter(id=old_tok.id).exists())
+        self.assertFalse(PickerSession.objects.filter(id=old_sess.id).exists())
+
+        # Aged report item is expired but preserves provenance sha/size; fresh item stays ready
+        aged_item = ReportImportItem.objects.get(job_id=old_job_id)
+        self.assertEqual(aged_item.state, 'expired')
+        self.assertEqual(aged_item.error_code, 'FILE_EXPIRED')
+        self.assertEqual(aged_item.output_sha, old_sha)
+        self.assertEqual(aged_item.output_size, old_size)
+        self.assertFalse(bool(aged_item.output_file))
+
+        fresh_item = ReportImportItem.objects.get(job_id=new_job_id)
+        self.assertEqual(fresh_item.state, 'ready')
+        self.assertTrue(bool(fresh_item.output_file))
+
+        # Aged audit detail redacted while keeping structural provenance
+        old_audit.refresh_from_db()
+        self.assertTrue(old_audit.detail.get('_redacted'))
+        self.assertEqual(old_audit.detail.get('query'), '[redacted-by-retention-policy]')
+        self.assertEqual(old_audit.case_id, 'CASE-AGED')
+        self.assertEqual(old_audit.photo_ids, [self.photo_a1.id])
+
+        # Downloading expired report copy via ticket returns 410 FILE_EXPIRED
+        r_dl = self.client.get(f'/integration/v1/assets/{old_ticket}', **self._auth(tok))
+        self.assertEqual(r_dl.status_code, 410)
+        self.assertEqual(r_dl.json()['error']['code'], 'FILE_EXPIRED')
+
+        # Querying job detail shows expired state + preserved sha256 + no download ticket
+        r_detail = self.client.get(f'/integration/v1/report-imports/{old_job_id}', **self._auth(tok))
+        self.assertEqual(r_detail.status_code, 200)
+        d_json = r_detail.json()
+        self.assertEqual(d_json['summary']['expired'], 1)
+        self.assertEqual(d_json['items'][0]['state'], 'expired')
+        self.assertEqual(d_json['items'][0]['output']['sha256'], old_sha)
+        self.assertTrue(d_json['items'][0]['output']['expired'])
+        self.assertIsNone(d_json['items'][0]['output']['download_ticket'])
+
+        # Calling /retry on a completed job with expired items must NOT corrupt job.state to 'failed'
+        r_retry_exp = self.client.post(f'/integration/v1/report-imports/{old_job_id}/retry', **self._auth(tok))
+        self.assertEqual(r_retry_exp.status_code, 200)
+        self.assertEqual(r_retry_exp.json()['state'], 'completed')
+
+        # Storage deletion OSError must keep DB file reference intact and count failed_report_files
+        ReportImportJob.objects.filter(id=new_job_id).update(updated=aged_time, created=aged_time)
+        with mock.patch.object(fresh_item.output_file.storage, 'delete', side_effect=OSError('disk locked')):
+            res_err = run_integration_cleanup(report_retention_days=30, dry_run=False)
+        self.assertEqual(res_err['expired_report_files'], 0)
+        self.assertEqual(res_err['failed_report_files'], 1)
+        self.assertEqual(res_err['freed_bytes'], 0)
+        fresh_item.refresh_from_db()
+        self.assertEqual(fresh_item.state, 'ready')
+        self.assertTrue(bool(fresh_item.output_file))
+
+        with self.assertRaises(ValueError):
+            run_integration_cleanup(report_retention_days=-1)
+
+    def test_cleanup_integration_management_command(self):
+        """Phase 2: manage.py cleanup_integration CLI command dry-run & validation."""
+        from django.core.management import call_command
+        from django.core.management.base import CommandError
+
+        out = io.StringIO()
+        call_command('cleanup_integration', '--dry-run', '--json', stdout=out)
+        parsed = json.loads(out.getvalue())
+        self.assertTrue(parsed['dry_run'])
+        self.assertIn('expired_report_files', parsed)
+
+        with self.assertRaises(CommandError):
+            call_command('cleanup_integration', '--report-retention-days', '-5')
+
+    def test_admin_api_toggle_binding_imports_audit_filters_and_cleanup(self):
+        """Phase 2: admin API enhancements (toggle_binding, audit filters, imports, stats, cleanup)."""
+        # Non-admin must be denied
+        non_admin = Client()
+        non_admin.force_login(self.user_a)
+        r_forbid = non_admin.post(
+            '/api/integration_admin/cleanup',
+            data=json.dumps({'dry_run': True}),
+            content_type='application/json',
+        )
+        self.assertEqual(r_forbid.status_code, 403)
+
+        admin_client = Client()
+        admin_client.force_login(self.admin)
+
+        # Bind external identity then disable via toggle_binding -> identity_exchange must fail
+        r_bind = admin_client.post(
+            '/api/integration_admin/bind_identity',
+            data=json.dumps({
+                'system_id': str(self.sys_a.id),
+                'issuer': 'https://sso.agency.gov.tw',
+                'subject': 'emp-toggle-1',
+                'user_id': self.user_a.id,
+            }),
+            content_type='application/json',
+        )
+        self.assertEqual(r_bind.status_code, 200)
+        bind_id = r_bind.json()['id']
+
+        r_off = admin_client.post(
+            '/api/integration_admin/toggle_binding',
+            data=json.dumps({'id': bind_id, 'active': False}),
+            content_type='application/json',
+        )
+        self.assertEqual(r_off.status_code, 200)
+        self.assertFalse(r_off.json()['active'])
+
+        r_ex_fail = self.client.post(
+            '/integration/oauth/token',
+            data=json.dumps({
+                'grant_type': 'identity_exchange',
+                'client_id': self.sys_a.code,
+                'client_secret': self.sys_a_secret,
+                'issuer': 'https://sso.agency.gov.tw',
+                'subject': 'emp-toggle-1',
+            }),
+            content_type='application/json',
+        )
+        self.assertEqual(r_ex_fail.status_code, 401)
+
+        # Re-enable binding -> identity_exchange succeeds
+        r_on = admin_client.post(
+            '/api/integration_admin/toggle_binding',
+            data=json.dumps({'id': bind_id, 'active': True}),
+            content_type='application/json',
+        )
+        self.assertEqual(r_on.status_code, 200)
+        self.assertTrue(r_on.json()['active'])
+
+        r_ex_ok = self.client.post(
+            '/integration/oauth/token',
+            data=json.dumps({
+                'grant_type': 'identity_exchange',
+                'client_id': self.sys_a.code,
+                'client_secret': self.sys_a_secret,
+                'issuer': 'https://sso.agency.gov.tw',
+                'subject': 'emp-toggle-1',
+            }),
+            content_type='application/json',
+        )
+        self.assertEqual(r_ex_ok.status_code, 200)
+
+        # Filtered list returns stats, dataset_fields, imports, and filtered audits (partial action match + real outcomes)
+        IntegrationAudit.objects.create(
+            system=self.sys_a, user=self.user_a, action='report_import_create', outcome='failed', case_id='CASE-FLT-99'
+        )
+        r_list = admin_client.post(
+            '/api/integration_admin/list',
+            data=json.dumps({
+                'audit_system': self.sys_a.code,
+                'audit_action': 'report_import',
+                'audit_outcome': 'failed',
+                'audit_case_id': 'CASE-FLT-99',
+            }),
+            content_type='application/json',
+        )
+        self.assertEqual(r_list.status_code, 200)
+        lj = r_list.json()
+        self.assertIn('stats', lj)
+        self.assertIn('imports', lj)
+        self.assertIn('dataset_fields', lj)
+        ds_a_field_ids = [f['id'] for f in lj['dataset_fields'].get(str(self.ds_a.id), [])]
+        self.assertIn('bridge', ds_a_field_ids)
+        self.assertEqual(len(lj['audits']), 1)
+        self.assertEqual(lj['audits'][0]['case_id'], 'CASE-FLT-99')
+
+        # Secret rotation records distinct 'rotate_secret' event action
+        r_rot = admin_client.post(
+            '/api/integration_admin/save_system',
+            data=json.dumps({
+                'id': str(self.sys_a.id),
+                'code': self.sys_a.code,
+                'name': self.sys_a.name,
+                'allowed_datasets': [self.ds_a.id],
+                'capabilities': self.sys_a.capabilities,
+                'allowed_fields': self.sys_a.allowed_fields,
+                'rotate_secret': True,
+                'reason': '定期輪換密鑰',
+            }),
+            content_type='application/json',
+        )
+        self.assertEqual(r_rot.status_code, 200)
+        self.assertIn('client_secret', r_rot.json())
+        self.assertEqual(
+            IntegrationSystemEvent.objects.filter(system=self.sys_a).order_by('-id').first().action,
+            'rotate_secret',
+        )
+
+        # Cleanup endpoint dry-run (including explicit null -> safe dry_run=True), execute, and validation
+        r_clean_null = admin_client.post(
+            '/api/integration_admin/cleanup',
+            data=json.dumps({'report_retention_days': 30, 'dry_run': None}),
+            content_type='application/json',
+        )
+        self.assertEqual(r_clean_null.status_code, 200)
+        self.assertTrue(r_clean_null.json()['result']['dry_run'])
+
+        r_clean_bad = admin_client.post(
+            '/api/integration_admin/cleanup',
+            data=json.dumps({'report_retention_days': -2, 'dry_run': True}),
+            content_type='application/json',
+        )
+        self.assertEqual(r_clean_bad.status_code, 422)
+
+        r_clean_ok = admin_client.post(
+            '/api/integration_admin/cleanup',
+            data=json.dumps({'report_retention_days': 30, 'dry_run': False}),
+            content_type='application/json',
+        )
+        self.assertEqual(r_clean_ok.status_code, 200)
+        self.assertTrue(r_clean_ok.json()['ok'])
+        self.assertIn('stats', r_clean_ok.json())

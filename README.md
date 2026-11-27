@@ -267,3 +267,12 @@ python verify-operations.py
   * 「工作集合」支援個人集合與科室共享集合（需該科整理權限），僅保存照片關聯、不複製或搬移原圖；任何讀取與集合內批次操作皆即時套用 `visible` 與回收區過濾，並記錄管理與共享異動稽核。
 * **檔案對帳與容量統計**：
   * [reconcile.py](file:///d:/%E7%85%A7%E7%89%87%E7%AE%A1%E7%90%86%E7%B3%BB%E7%B5%B1/core/reconcile.py) 與 [views_reconcile.py](file:///d:/%E7%85%A7%E7%89%87%E7%AE%A1%E7%90%86%E7%B3%BB%E7%B5%B1/core/views_reconcile.py)（限系統管理者）提供非破壞性對帳掃描（`missing_original`、`missing_preview`、`orphan_file`、`hash_mismatch`、`semantic_gap`、`ocr_gap`、`face_gap`、`external_stale`）、寬限期保護（預設 24 小時，排除進行中檔案）、獨立縮圖修復與人工確認清理孤立檔，並於「管理後台 → 部署與維運」呈現各科室／資料集容量、衍生檔空間、剩餘空間與未處理異常統計。
+
+
+## 跨業務整合（API v1、MCP、照片挑選器與治理維運）
+
+詳見 [跨業務整合指南](docs/INTEGRATION-API-MCP.md) 與 [第一階段實作規格](API-MCP與照片挑選器第一階段實作規格.md)：
+
+* **共用雙層授權與服務層**：所有整合通道（`/integration/v1/*`、`POST /mcp`、`python manage.py mcp_server`、`/picker`）共用 `core/integration_auth.py` 與 `core/integration_service.py`，嚴格套用「串接系統範圍 ∩ 操作人員權限 ∩ 本次請求範圍」。
+* **OpenAPI 3.1 與離線文件**：提供 `GET /integration/v1/openapi.json` 與無外部 CDN 的互動文件頁 `GET /integration/v1/docs`，另附端到端示範工作台 `/integration-demo`。
+* **後台治理與生命週期維護**：「管理後台 → 串接系統管理」支援系統建立／編輯、自訂欄位白名單、效期與頻率設定、密鑰輪換、外部人員身分綁定管理、報告匯入作業追蹤、可篩選稽核查詢及生命週期清理；亦可透過排程執行 `python manage.py cleanup_integration [--dry-run]` 清理逾齡報告實體副本（保留資料庫雜湊與追溯紀錄，逾齡下載明確回傳 `410 FILE_EXPIRED`）並依保存政策遮罩逾齡稽核查詢字詞。

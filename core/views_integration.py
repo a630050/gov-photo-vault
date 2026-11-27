@@ -41,6 +41,14 @@ from .integration_service import (
     service_search_photos,
     service_serve_asset_by_ticket,
 )
+from .integration_maintenance import (
+    DEFAULT_AUDIT_DETAIL_DAYS,
+    DEFAULT_REPORT_RETENTION_DAYS,
+    DEFAULT_TOKEN_RETENTION_DAYS,
+    integration_storage_stats,
+    run_integration_cleanup,
+)
+from .integration_openapi import build_integration_openapi_spec
 from .mcp_server import handle_mcp_request
 from .models import (
     Dataset,
@@ -51,6 +59,7 @@ from .models import (
     IntegrationSystemEvent,
     IntegrationToken,
     PickerSession,
+    ReportImportJob,
 )
 
 
@@ -680,6 +689,22 @@ def integration_demo_page(request):
     return render(request, 'integration_demo.html', {'csrf_cookie_name': settings.CSRF_COOKIE_NAME})
 
 
+def integration_openapi_view(request):
+    if request.method != 'GET':
+        return _error_response(IntegrationError('INVALID_CRITERIA', '僅支援 GET', status=405))
+    base = request.build_absolute_uri('/').rstrip('/')
+    resp = JsonResponse(build_integration_openapi_spec(base))
+    resp['Cache-Control'] = 'no-store'
+    return resp
+
+
+def integration_docs_view(request):
+    if request.method not in ('GET', 'HEAD'):
+        return _error_response(IntegrationError('INVALID_CRITERIA', '僅支援 GET', status=405))
+    base = request.build_absolute_uri('/').rstrip('/')
+    return render(request, 'integration_docs.html', {'base_url': base})
+
+
 # ---------------------------------------------------------------------------
 # Admin Management API for Integration Systems (called via /api/integration_admin/*)
 # ---------------------------------------------------------------------------
@@ -738,6 +763,19 @@ def handle_integration_admin_api(path, data, u):
             }
             for e in IntegrationSystemEvent.objects.select_related('system', 'actor').order_by('-id')[:100]
         ]
+        audit_qs = IntegrationAudit.objects.select_related('system', 'user').order_by('-id')
+        f_sys = str((data or {}).get('audit_system') or '').strip()
+        f_act = str((data or {}).get('audit_action') or '').strip()
+        f_out = str((data or {}).get('audit_outcome') or '').strip()
+        f_case = str((data or {}).get('audit_case_id') or '').strip()
+        if f_sys:
+            audit_qs = audit_qs.filter(system__code=f_sys)
+        if f_act:
+            audit_qs = audit_qs.filter(action__icontains=f_act)
+        if f_out:
+            audit_qs = audit_qs.filter(outcome=f_out)
+        if f_case:
+            audit_qs = audit_qs.filter(case_id__icontains=f_case)
         audits = [
             {
                 'id': a.id,
@@ -757,14 +795,47 @@ def handle_integration_admin_api(path, data, u):
                 'detail': a.detail,
                 'created': a.created.isoformat(),
             }
-            for a in IntegrationAudit.objects.select_related('system', 'user').order_by('-id')[:100]
+            for a in audit_qs[:100]
         ]
+        imports = []
+        for job in ReportImportJob.objects.select_related('system', 'user').prefetch_related('items').order_by('-created')[:50]:
+            items_list = list(job.items.all())
+            imports.append({
+                'id': str(job.id),
+                'system_code': job.system.code,
+                'username': job.user.username,
+                'case_id': job.case_id,
+                'report_id': job.report_id,
+                'state': job.state,
+                'total': len(items_list),
+                'ready': sum(1 for it in items_list if it.state == 'ready'),
+                'expired': sum(1 for it in items_list if it.state == 'expired'),
+                'failed': sum(1 for it in items_list if it.state not in ('ready', 'expired')),
+                'confirmed_at': job.confirmed_at.isoformat(),
+                'created': job.created.isoformat(),
+            })
+        dataset_fields = {}
+        for d in Dataset.objects.select_related('item').all():
+            fields_list = []
+            if d.item_id and isinstance(d.item.fields, list):
+                for f in d.item.fields:
+                    fid = str(f.get('key') or f.get('id') or '').strip()
+                    if fid:
+                        fields_list.append({
+                            'id': fid,
+                            'label': str(f.get('label') or fid),
+                            'type': str(f.get('type') or 'text'),
+                        })
+            dataset_fields[str(d.id)] = fields_list
         return JsonResponse({
             'systems': systems,
             'bindings': bindings,
             'tokens': tokens,
             'events': events,
             'audits': audits,
+            'imports': imports,
+            'dataset_fields': dataset_fields,
+            'stats': integration_storage_stats(),
         })
 
     if path == 'integration_admin/save_system':
@@ -843,6 +914,7 @@ def handle_integration_admin_api(path, data, u):
         if data.get('rotate_secret') and sys_id:
             new_secret = generate_opaque_token('ics')
             s.client_secret_sha = hash_secret(new_secret)
+            action = 'rotate_secret'
         try:
             s.save()
         except IntegrityError as exc:
@@ -970,5 +1042,49 @@ def handle_integration_admin_api(path, data, u):
         tok.save(update_fields=['revoked'])
         audit(u, 'integration_revoke_token', str(tok.id), {'system': tok.system.code})
         return JsonResponse({'ok': True})
+
+    if path == 'integration_admin/toggle_binding':
+        try:
+            binding = ExternalIdentityBinding.objects.select_related('system', 'user').get(id=int(data.get('id')))
+        except (ExternalIdentityBinding.DoesNotExist, TypeError, ValueError) as exc:
+            raise Problem('找不到指定的外部身分綁定', 404) from exc
+        raw_active = data.get('active')
+        new_active = (not binding.active) if raw_active is None else bool(raw_active)
+        binding.active = new_active
+        binding.verified_by = u
+        binding.verified_at = timezone.now()
+        binding.save(update_fields=['active', 'verified_by', 'verified_at'])
+        audit(
+            u,
+            'integration_toggle_binding',
+            f'{binding.system.code}:{binding.subject}',
+            {'user': binding.user.username, 'active': binding.active},
+        )
+        return JsonResponse({'ok': True, 'id': binding.id, 'active': binding.active})
+
+    if path == 'integration_admin/cleanup':
+        raw_dry_run = data.get('dry_run')
+        dry_run = True if raw_dry_run is None else bool(raw_dry_run)
+        try:
+            result = run_integration_cleanup(
+                report_retention_days=data.get('report_retention_days', DEFAULT_REPORT_RETENTION_DAYS),
+                token_retention_days=data.get('token_retention_days', DEFAULT_TOKEN_RETENTION_DAYS),
+                audit_detail_days=data.get('audit_detail_days', DEFAULT_AUDIT_DETAIL_DAYS),
+                dry_run=dry_run,
+            )
+        except ValueError as exc:
+            raise Problem(str(exc), 422) from exc
+        if not result['dry_run']:
+            audit(u, 'integration_cleanup', 'maintenance', {
+                'expired_report_files': result['expired_report_files'],
+                'failed_report_files': result['failed_report_files'],
+                'freed_bytes': result['freed_bytes'],
+                'deleted_auth_codes': result['deleted_auth_codes'],
+                'deleted_tokens': result['deleted_tokens'],
+                'deleted_picker_sessions': result['deleted_picker_sessions'],
+                'redacted_audits': result['redacted_audits'],
+                'retention_policy': result['retention_policy'],
+            })
+        return JsonResponse({'ok': True, 'result': result, 'stats': integration_storage_stats()})
 
     return None

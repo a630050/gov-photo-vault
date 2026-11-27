@@ -8,8 +8,11 @@
 
 - `core/integration_auth.py`：雙層授權交集（串接系統 ∩ 操作人員）、OAuth／OIDC 憑證驗證、短效簽章圖片憑證、頻率限制與結構化稽核。
 - `core/integration_service.py`：共用資料集查詢、一般／附近／OCR／中文影像內容搜尋、批次最新狀態解析、報告用圖副本產生（EXIF 方向校正、不放大、剝除未授權 EXIF）與冪等報告匯入。
+- `core/integration_openapi.py` & `templates/integration_docs.html`：OpenAPI 3.1.0 規格（`/integration/v1/openapi.json`）與無外部 CDN 之離線互動 API 文件（`/integration/v1/docs`）。
+- `core/integration_maintenance.py` & `core/management/commands/cleanup_integration.py`：報告用圖副本保留期限清理（保留雜湊與追溯紀錄，逾齡下載回傳 `410 FILE_EXPIRED`）、過期憑證／挑選工作階段清理與逾齡稽核查詢字詞遮罩。
 - `core/mcp_server.py`：將共用服務包裝為四個唯讀 MCP 工具（`list_photo_datasets`、`search_photos`、`get_photo_previews`、`get_photo_details`）。
-- `core/views_integration.py`：HTTP 端點、OAuth 2.0（含 PKCE S256 與經驗證身分交換）、MCP HTTP 端點、挑選器工作階段與後台管理 API。
+- `core/views_integration.py`：HTTP 端點、OAuth 2.0（含 PKCE S256 與經驗證身分交換）、MCP HTTP 端點、挑選器工作階段與後台治理 API。
+- `static/admin.js`：管理後台「串接系統管理」完整治理介面（建立／編輯系統、自訂欄位白名單、效期與頻率設定、密鑰輪換、外部身分綁定管理、報告匯入追蹤、儲存統計與生命週期清理、變更紀錄與可篩選稽核查詢）。
 - `templates/picker.html` & `static/picker.js`：可重用照片挑選器（iframe／彈出視窗）。
 - `templates/integration_demo.html` & `static/integration-demo.js`：防災系統整合示範工作台（`/integration-demo`），端到端展示「AI 搜尋回圖」與「勘災報告選圖匯入」。
 
@@ -38,6 +41,8 @@ python manage.py test core.test_integration --verbosity=2
 
 | 端點 | 方法 | 用途 |
 |---|---|---|
+| `/integration/v1/openapi.json` | `GET` | 取得 OpenAPI 3.1.0 機器可讀規格 |
+| `/integration/v1/docs` | `GET` | 離線互動式整合 API 文件（無外部 CDN） |
 | `/integration/v1/capabilities` | `GET` | 查詢目前雙層身分可用功能與限制 |
 | `/integration/v1/datasets` | `GET` | 列出授權交集內的資料集與允許自訂欄位 |
 | `/integration/v1/photos/search` | `POST` | 分頁搜尋（`general` / `nearby` / `ocr` / `semantic`），預設時區 `Asia/Taipei` |
@@ -76,4 +81,4 @@ python manage.py test core.test_integration --verbosity=2
 1. **資料庫與空間索引**：本機版以 SQLite 實作萬筆分頁與邊界框過濾；正式百萬筆以上大規模環境仍須搭配 PostgreSQL／PostGIS 與獨立快取（如 Redis）做分散式限流。
 2. **機關 SSO／OIDC 實接**：目前提供標準 OAuth 2.0 授權碼＋PKCE 及 `ExternalIdentityBinding`（`issuer` + `subject`）身分交換介面，實際機關 IdP（如 Keycloak／ADFS／政府單一簽入）的 JWKS 簽章驗證須於正式環境依機關規格對接。
 3. **防災系統端整合**：本專案內附 `/integration-demo` 作為端到端驗證工作台；防災系統正式版須依本規格在其後端保管 `client_secret`、驗證圖片 SHA-256 並以「匯入作業＋照片項目識別」防止重複匯入。
-4. **圖片檔案生命週期**：已產出的報告用圖副本位於 `storage/integration_reports/`，正式環境須另訂清理排程與保留期限。
+4. **圖片檔案生命週期與清理排程**：已產出的報告用圖副本位於 `storage/integration_reports/`，現已提供 `python manage.py cleanup_integration`（支援 `--dry-run`、`--report-retention-days`、`--token-retention-days`、`--audit-detail-days`、`--json`）及管理後台一鍵預覽／執行清理（清理後保留資料庫雜湊與來源追溯，逾齡取圖明確回傳 `410 FILE_EXPIRED`）；正式環境仍須於 Windows 工作排程器或 cron 定期排程執行。

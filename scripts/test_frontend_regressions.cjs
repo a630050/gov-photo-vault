@@ -8,6 +8,7 @@ const root = path.resolve(__dirname, '..');
 const library = fs.readFileSync(path.join(root, 'static/library.js'), 'utf8');
 const app = fs.readFileSync(path.join(root, 'static/app.js'), 'utf8');
 const upload = fs.readFileSync(path.join(root, 'static/upload.js'), 'utf8');
+const admin = fs.readFileSync(path.join(root, 'static/admin.js'), 'utf8');
 function deferred() {
   let resolve, reject;
   const promise = new Promise((yes, no) => {resolve = yes; reject = no;});
@@ -145,4 +146,19 @@ test('F04: previous cluster callbacks are inert while replacement request is pen
   deferredResponse.reject(Error('offline'));await pending;
   oldClick();assert.equal(clicked,0);
   assert.ok(clearCount>=2);
+});
+
+test('F05: integration admin formats UTC ISO timestamps in Asia/Taipei and rejects empty/invalid cleanup retention days', () => {
+  const {run} = setup();
+  run(admin);
+  assert.equal(run("formatTaipeiDateTime('2026-12-31T16:00:00+00:00')"), '2027-01-01 00:00');
+  assert.equal(run("formatTaipeiDateTime('2026-12-31T16:00:05+00:00', true)"), '2027-01-01 00:00:05');
+  assert.equal(run("formatTaipeiDateTime('')"), '');
+  assert.equal(run("parseRetentionDaysInput('0', '報告副本保留天數')"), 0);
+  assert.equal(run("parseRetentionDaysInput('3650', '報告副本保留天數')"), 3650);
+  assert.throws(() => run("parseRetentionDaysInput('', '報告副本保留天數')"), /整數天數/);
+  assert.throws(() => run("parseRetentionDaysInput('   ', '報告副本保留天數')"), /整數天數/);
+  assert.throws(() => run("parseRetentionDaysInput('-1', '報告副本保留天數')"), /整數天數/);
+  assert.throws(() => run("parseRetentionDaysInput('1.5', '報告副本保留天數')"), /整數天數/);
+  assert.throws(() => run("parseRetentionDaysInput('3651', '報告副本保留天數')"), /0 至 3650/);
 });

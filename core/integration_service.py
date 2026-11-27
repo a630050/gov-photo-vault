@@ -1010,9 +1010,9 @@ def _recompute_job_state(job: ReportImportJob):
     states = list(job.items.values_list('state', flat=True))
     if not states:
         job.state = 'failed'
-    elif all(s == 'ready' for s in states):
+    elif all(s in ('ready', 'expired') for s in states):
         job.state = 'completed'
-    elif any(s == 'ready' for s in states):
+    elif any(s in ('ready', 'expired') for s in states):
         job.state = 'partial_failed'
     else:
         job.state = 'failed'
@@ -1048,6 +1048,24 @@ def _serialize_import_job(ctx: IntegrationContext, job: ReportImportJob, idempot
                 live_status = 'revoked'
                 revocation_notice = '照片已回收或授權已撤銷，無法再取用圖片'
 
+        output_info = None
+        if item.state == 'ready' and download_ticket:
+            output_info = {
+                'sha256': item.output_sha,
+                'size': item.output_size,
+                'format': item.output_format,
+                'expired': False,
+                'download_ticket': download_ticket,
+            }
+        elif item.state == 'expired':
+            output_info = {
+                'sha256': item.output_sha,
+                'size': item.output_size,
+                'format': item.output_format,
+                'expired': True,
+                'download_ticket': None,
+            }
+
         items_out.append({
             'item_id': str(item.id),
             'ordinal': item.ordinal,
@@ -1063,21 +1081,13 @@ def _serialize_import_job(ctx: IntegrationContext, job: ReportImportJob, idempot
             'state': live_status,
             'error_code': item.error_code if live_status != 'revoked' else 'PERMISSION_DENIED',
             'error_message': revocation_notice or item.error_message,
-            'output': (
-                {
-                    'sha256': item.output_sha,
-                    'size': item.output_size,
-                    'format': item.output_format,
-                    'download_ticket': download_ticket,
-                }
-                if item.state == 'ready' and download_ticket
-                else None
-            ),
+            'output': output_info,
             'fetched_at': item.fetched_at.isoformat() if item.fetched_at else None,
         })
 
     ready_count = sum(1 for x in items_out if x['state'] == 'ready')
-    failed_count = len(items_out) - ready_count
+    expired_count = sum(1 for x in items_out if x['state'] == 'expired')
+    failed_count = len(items_out) - ready_count - expired_count
     return {
         'import_job_id': str(job.id),
         'idempotency_key': job.idempotency_key,
@@ -1091,6 +1101,7 @@ def _serialize_import_job(ctx: IntegrationContext, job: ReportImportJob, idempot
         'summary': {
             'total': len(items_out),
             'ready': ready_count,
+            'expired': expired_count,
             'failed': failed_count,
         },
         'items': items_out,
@@ -1282,12 +1293,13 @@ def service_serve_asset_by_ticket(ticket: str, expected_system_id: str = None, e
             id=iid,
             photo_id=p.id,
             job__system=ctx.system,
-            state='ready',
         )
         if ctx.actor_type == 'user':
             item_qs = item_qs.filter(job__user=ctx.user)
         item = item_qs.first()
-        if not item or not item.output_file:
+        if item and item.state == 'expired':
+            raise IntegrationError('FILE_EXPIRED', '此報告用圖副本已逾保留期限並依政策清理，請重新建立報告匯入作業', status=410)
+        if not item or item.state != 'ready' or not item.output_file:
             raise IntegrationError('STORAGE_UNAVAILABLE', '報告用圖副本不存在', status=404)
         try:
             with item.output_file.open('rb') as fh:
@@ -1320,12 +1332,13 @@ def service_serve_asset_by_ticket(ticket: str, expected_system_id: str = None, e
                 photo_id=p.id,
                 job__system=ctx.system,
                 variant='original',
-                state='ready',
             )
             if ctx.actor_type == 'user':
                 item_qs = item_qs.filter(job__user=ctx.user)
             item = item_qs.first()
-            if not item or not item.output_file:
+            if item and item.state == 'expired':
+                raise IntegrationError('FILE_EXPIRED', '此報告原圖副本已逾保留期限並依政策清理，請重新建立報告匯入作業', status=410)
+            if not item or item.state != 'ready' or not item.output_file:
                 raise IntegrationError('STORAGE_UNAVAILABLE', '報告原圖副本不存在', status=404)
             try:
                 with item.output_file.open('rb') as fh:
